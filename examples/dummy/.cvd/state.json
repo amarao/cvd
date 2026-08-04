@@ -1,0 +1,294 @@
+{
+  "schema_version": 1,
+  "run_id": "run-205552-1785857706726",
+  "configuration_path": "/home/amarao/git/cvd/examples/dummy/cvd.yml",
+  "configuration_fingerprint": "stub-hash-7ba7c44ffd9a1016",
+  "keep": true,
+  "scenarios": {
+    "default": {
+      "path": "default",
+      "phases": {
+        "dependency": {
+          "status": "skipped",
+          "started_at": 1785857706740,
+          "completed_at": 1785857706740
+        },
+        "create": {
+          "status": "pass",
+          "started_at": 1785857706743,
+          "completed_at": 1785857706745
+        },
+        "prepare": {
+          "status": "skipped",
+          "started_at": 1785857706746,
+          "completed_at": 1785857706746
+        },
+        "converge": {
+          "status": "skipped",
+          "started_at": 1785857706748,
+          "completed_at": 1785857706748
+        },
+        "idempotence": {
+          "status": "skipped",
+          "started_at": 1785857706750,
+          "completed_at": 1785857706750
+        },
+        "verify": {
+          "status": "pass",
+          "started_at": 1785857706752,
+          "completed_at": 1785857706758
+        },
+        "cleanup": {
+          "status": "skipped",
+          "started_at": 1785857706824,
+          "completed_at": 1785857706824
+        },
+        "destroy": {
+          "status": "skipped",
+          "started_at": 1785857706826,
+          "completed_at": 1785857706826
+        }
+      },
+      "suite_results": [
+        {
+          "name": "smoke",
+          "status": "pass",
+          "recorded_at": 1785857706754
+        },
+        {
+          "name": "regression",
+          "status": "pass",
+          "recorded_at": 1785857706756
+        }
+      ],
+      "resources": {
+        "resources": []
+      }
+    },
+    "default/restart": {
+      "path": "default/restart",
+      "parent_path": "default",
+      "phases": {
+        "dependency": {
+          "status": "skipped",
+          "started_at": 1785857706759,
+          "completed_at": 1785857706759
+        },
+        "create": {
+          "status": "pass",
+          "started_at": 1785857706761,
+          "completed_at": 1785857706762
+        },
+        "prepare": {
+          "status": "skipped",
+          "started_at": 1785857706763,
+          "completed_at": 1785857706763
+        },
+        "converge": {
+          "status": "skipped",
+          "started_at": 1785857706765,
+          "completed_at": 1785857706765
+        },
+        "idempotence": {
+          "status": "skipped",
+          "started_at": 1785857706767,
+          "completed_at": 1785857706767
+        },
+        "verify": {
+          "status": "pass",
+          "started_at": 1785857706769,
+          "completed_at": 1785857706772
+        },
+        "cleanup": {
+          "status": "skipped",
+          "started_at": 1785857706791,
+          "completed_at": 1785857706791
+        },
+        "destroy": {
+          "status": "skipped",
+          "started_at": 1785857706794,
+          "completed_at": 1785857706794
+        }
+      },
+      "suite_results": [
+        {
+          "name": "after-restart",
+          "status": "pass",
+          "recorded_at": 1785857706770
+        }
+      ],
+      "resources": {
+        "resources": []
+      }
+    },
+    "default/restart/configuration-check": {
+      "path": "default/restart/configuration-check",
+      "parent_path": "default/restart",
+      "phases": {
+        "dependency": {
+          "status": "skipped",
+          "started_at": 1785857706774,
+          "completed_at": 1785857706774
+        },
+        "create": {
+          "status": "pass",
+          "started_at": 1785857706775,
+          "completed_at": 1785857706777
+        },
+        "prepare": {
+          "status": "skipped",
+          "started_at": 1785857706778,
+          "completed_at": 1785857706778
+        },
+        "converge": {
+          "status": "skipped",
+          "started_at": 1785857706780,
+          "completed_at": 1785857706780
+        },
+        "idempotence": {
+          "status": "skipped",
+          "started_at": 1785857706781,
+          "completed_at": 1785857706781
+        },
+        "verify": {
+          "status": "pass",
+          "started_at": 1785857706782,
+          "completed_at": 1785857706785
+        },
+        "cleanup": {
+          "status": "skipped",
+          "started_at": 1785857706787,
+          "completed_at": 1785857706787
+        },
+        "destroy": {
+          "status": "skipped",
+          "started_at": 1785857706789,
+          "completed_at": 1785857706789
+        }
+      },
+      "suite_results": [
+        {
+          "name": "nested-smoke",
+          "status": "pass",
+          "recorded_at": 1785857706784
+        }
+      ],
+      "resources": {
+        "resources": []
+      }
+    },
+    "default/upgrade": {
+      "path": "default/upgrade",
+      "parent_path": "default",
+      "phases": {
+        "dependency": {
+          "status": "skipped",
+          "started_at": 1785857706796,
+          "completed_at": 1785857706796
+        },
+        "create": {
+          "status": "pass",
+          "started_at": 1785857706798,
+          "completed_at": 1785857706801
+        },
+        "prepare": {
+          "status": "skipped",
+          "started_at": 1785857706804,
+          "completed_at": 1785857706804
+        },
+        "converge": {
+          "status": "skipped",
+          "started_at": 1785857706807,
+          "completed_at": 1785857706807
+        },
+        "idempotence": {
+          "status": "skipped",
+          "started_at": 1785857706810,
+          "completed_at": 1785857706810
+        },
+        "verify": {
+          "status": "pass",
+          "started_at": 1785857706812,
+          "completed_at": 1785857706816
+        },
+        "cleanup": {
+          "status": "skipped",
+          "started_at": 1785857706818,
+          "completed_at": 1785857706818
+        },
+        "destroy": {
+          "status": "skipped",
+          "started_at": 1785857706821,
+          "completed_at": 1785857706821
+        }
+      },
+      "suite_results": [
+        {
+          "name": "after-upgrade",
+          "status": "pass",
+          "recorded_at": 1785857706814
+        }
+      ],
+      "resources": {
+        "resources": []
+      }
+    },
+    "independent": {
+      "path": "independent",
+      "phases": {
+        "dependency": {
+          "status": "skipped",
+          "started_at": 1785857706829,
+          "completed_at": 1785857706829
+        },
+        "create": {
+          "status": "pass",
+          "started_at": 1785857706831,
+          "completed_at": 1785857706833
+        },
+        "prepare": {
+          "status": "skipped",
+          "started_at": 1785857706835,
+          "completed_at": 1785857706835
+        },
+        "converge": {
+          "status": "skipped",
+          "started_at": 1785857706837,
+          "completed_at": 1785857706837
+        },
+        "idempotence": {
+          "status": "skipped",
+          "started_at": 1785857706839,
+          "completed_at": 1785857706839
+        },
+        "verify": {
+          "status": "pass",
+          "started_at": 1785857706841,
+          "completed_at": 1785857706844
+        },
+        "cleanup": {
+          "status": "skipped",
+          "started_at": 1785857706847,
+          "completed_at": 1785857706847
+        },
+        "destroy": {
+          "status": "skipped",
+          "started_at": 1785857706849,
+          "completed_at": 1785857706849
+        }
+      },
+      "suite_results": [
+        {
+          "name": "standalone-smoke",
+          "status": "pass",
+          "recorded_at": 1785857706843
+        }
+      ],
+      "resources": {
+        "resources": []
+      }
+    }
+  },
+  "started_at": 1785857706726,
+  "updated_at": 1785857706849
+}

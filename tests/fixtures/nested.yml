@@ -1,0 +1,20 @@
+version: 1
+scenarios:
+  default:
+    provisioner: dummy
+    suites:
+      smoke:
+        verifier: dummy
+    scenarios:
+      restart:
+        provisioner: dummy
+        suites:
+          after-restart:
+            verifier: dummy
+        scenarios:
+          deep:
+            provisioner: dummy
+      ignored:
+        provisioner: dummy
+  independent:
+    provisioner: dummy

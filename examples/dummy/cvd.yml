@@ -1,0 +1,31 @@
+version: 1
+scenarios:
+  default:
+    provisioner: dummy
+    suites:
+      smoke:
+        verifier: dummy
+      regression:
+        verifier: dummy
+    scenarios:
+      restart:
+        provisioner: dummy
+        suites:
+          after-restart:
+            verifier: dummy
+        scenarios:
+          configuration-check:
+            provisioner: dummy
+            suites:
+              nested-smoke:
+                verifier: dummy
+      upgrade:
+        provisioner: dummy
+        suites:
+          after-upgrade:
+            verifier: dummy
+  independent:
+    provisioner: dummy
+    suites:
+      standalone-smoke:
+        verifier: dummy
