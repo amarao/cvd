@@ -1,0 +1,7 @@
+- name: CVD bad configuration stub
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Report bad configuration
+      ansible.builtin.debug:
+        msg: CVD bad configuration stub

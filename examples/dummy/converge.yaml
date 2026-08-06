@@ -1,0 +1,7 @@
+- name: CVD converge stub
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Report converge
+      ansible.builtin.debug:
+        msg: CVD converge stub

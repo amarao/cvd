@@ -1,0 +1,8 @@
+- name: CVD configuration preparation stub
+  hosts: all,localhost
+  gather_facts: false
+  tasks:
+    - name: Report configuration preparation
+      ansible.builtin.debug:
+        msg: CVD configuration preparation stub
+    - fail:

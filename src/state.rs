@@ -11,23 +11,23 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
+    process,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 
-pub const STATE_SCHEMA_VERSION: u32 = 1;
+pub const STATE_SCHEMA_VERSION: u32 = 3;
 
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 /// The dummy-stub default, colocated with the selected configuration file.
-pub fn default_state_path(configuration_path: &Path) -> PathBuf {
+pub fn default_state_directory(configuration_path: &Path) -> PathBuf {
     configuration_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(".cvd")
-        .join("state.json")
 }
 
 /// A millisecond Unix timestamp.  An integer keeps state self-contained and
@@ -98,7 +98,7 @@ pub enum VerifierStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SuiteResult {
+pub struct TestResult {
     pub name: String,
     pub status: VerifierStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,16 +107,25 @@ pub struct SuiteResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceLocation {
+    pub scenario_path: String,
+    pub phase: LifecyclePhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Resource {
     pub id: String,
     #[serde(rename = "type")]
     pub resource_type: String,
+    pub exists: bool,
+    pub created: ResourceLocation,
+    pub destroyed: Option<ResourceLocation>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attributes: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub relationships: BTreeSet<String>,
     /// Attribute names omitted from serialized views in a later resource
-    /// protocol.  The dummy provisioner always returns an empty manifest.
+    /// protocol.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub sensitive_attributes: BTreeSet<String>,
 }
@@ -158,7 +167,7 @@ pub struct ScenarioState {
     #[serde(default)]
     pub phases: BTreeMap<LifecyclePhase, PhaseState>,
     #[serde(default)]
-    pub suite_results: Vec<SuiteResult>,
+    pub test_results: Vec<TestResult>,
     #[serde(default)]
     pub resources: ResourceManifest,
 }
@@ -169,7 +178,7 @@ impl ScenarioState {
             path: path.into(),
             parent_path,
             phases: BTreeMap::new(),
-            suite_results: Vec::new(),
+            test_results: Vec::new(),
             resources: ResourceManifest::default(),
         }
     }
@@ -255,13 +264,24 @@ impl RunState {
         self.touch();
     }
 
-    pub fn record_suite_result(&mut self, scenario_path: &str, result: SuiteResult) {
-        self.scenario_mut(scenario_path).suite_results.push(result);
+    pub fn record_test_result(&mut self, scenario_path: &str, result: TestResult) {
+        self.scenario_mut(scenario_path).test_results.push(result);
         self.touch();
     }
 
     pub fn set_resources(&mut self, scenario_path: &str, resources: ResourceManifest) {
         self.scenario_mut(scenario_path).resources = resources;
+        self.touch();
+    }
+
+    pub fn mark_resources_destroyed(&mut self, scenario_path: &str) {
+        for resource in &mut self.scenario_mut(scenario_path).resources.resources {
+            resource.exists = false;
+            resource.destroyed = Some(ResourceLocation {
+                scenario_path: scenario_path.to_owned(),
+                phase: LifecyclePhase::Destroy,
+            });
+        }
         self.touch();
     }
 
@@ -295,6 +315,121 @@ impl RunState {
 #[derive(Debug, Clone)]
 pub struct StateStore {
     path: PathBuf,
+}
+
+/// Locates the durable state for a project's independent CVD runs.
+///
+/// A repository owns the directory containing `runs/` and the `last-run`
+/// pointer.  It deliberately has no cross-process locking; that policy remains
+/// deferred, but individual file replacements are atomic.
+#[derive(Debug, Clone)]
+pub struct StateRepository {
+    directory: PathBuf,
+}
+
+impl StateRepository {
+    pub fn new(directory: impl Into<PathBuf>) -> Self {
+        Self {
+            directory: directory.into(),
+        }
+    }
+
+    /// Persist a newly created run before making it discoverable as `last`.
+    /// Existing run IDs are rejected so history is never overwritten.
+    pub fn start_run(&self, state: &RunState) -> Result<StateStore, StateRepositoryError> {
+        let store = self.store_for_run(&state.run_id)?;
+        if store.path().exists() {
+            return Err(StateRepositoryError::RunAlreadyExists {
+                run_id: state.run_id.clone(),
+            });
+        }
+        store.save(state)?;
+        self.update_last_run(&state.run_id)?;
+        Ok(store)
+    }
+
+    /// Resolve a requested ID, with `last` reading the atomic pointer.
+    pub fn open_run(&self, requested: &str) -> Result<(String, StateStore), StateRepositoryError> {
+        let run_id = if requested == "last" {
+            self.last_run_id()?
+        } else {
+            validate_run_id(requested)?;
+            requested.to_owned()
+        };
+        let store = self.store_for_run(&run_id)?;
+        if !store.path().is_file() {
+            return Err(StateRepositoryError::UnknownRun { run_id });
+        }
+        Ok((run_id, store))
+    }
+
+    pub fn store_for_run(&self, run_id: &str) -> Result<StateStore, StateRepositoryError> {
+        validate_run_id(run_id)?;
+        Ok(StateStore::new(
+            self.directory.join("runs").join(run_id).join("state.json"),
+        ))
+    }
+
+    fn last_run_id(&self) -> Result<String, StateRepositoryError> {
+        let path = self.directory.join("last-run");
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                return Err(StateRepositoryError::NoLastRun {
+                    directory: self.directory.clone(),
+                });
+            }
+            Err(source) => return Err(StateRepositoryError::PointerIo { path, source }),
+        };
+        let Some(run_id) = contents.strip_suffix('\n') else {
+            return Err(StateRepositoryError::InvalidLastRunPointer { path });
+        };
+        validate_run_id(run_id)
+            .map_err(|_| StateRepositoryError::InvalidLastRunPointer { path })?;
+        Ok(run_id.to_owned())
+    }
+
+    fn update_last_run(&self, run_id: &str) -> Result<(), StateRepositoryError> {
+        validate_run_id(run_id)?;
+        let path = self.directory.join("last-run");
+        atomic_write(&path, format!("{run_id}\n").as_bytes()).map_err(|source| {
+            StateRepositoryError::PointerIo {
+                path: path.clone(),
+                source,
+            }
+        })
+    }
+}
+
+fn validate_run_id(run_id: &str) -> Result<(), StateRepositoryError> {
+    if run_id.is_empty()
+        || run_id == "."
+        || run_id == ".."
+        || run_id.contains('/')
+        || run_id.contains('\\')
+        || Path::new(run_id).components().count() != 1
+    {
+        return Err(StateRepositoryError::InvalidRunId(run_id.to_owned()));
+    }
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StateRepositoryError {
+    #[error("invalid run ID `{0}`")]
+    InvalidRunId(String),
+    #[error("no last run in {}", directory.display())]
+    NoLastRun { directory: PathBuf },
+    #[error("unknown run `{run_id}`")]
+    UnknownRun { run_id: String },
+    #[error("run `{run_id}` already exists")]
+    RunAlreadyExists { run_id: String },
+    #[error("invalid last-run pointer in {}", path.display())]
+    InvalidLastRunPointer { path: PathBuf },
+    #[error("cannot read or update last-run pointer {}: {source}", path.display())]
+    PointerIo { path: PathBuf, source: io::Error },
+    #[error(transparent)]
+    State(#[from] StateError),
 }
 
 impl StateStore {
@@ -423,6 +558,44 @@ impl StateStore {
     }
 }
 
+/// Atomically replace a small plain-text repository metadata file.
+fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(directory)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state");
+
+    for _ in 0..16 {
+        let sequence = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+        let temporary_path = directory.join(format!(".{name}.{}.{}.tmp", process::id(), sequence));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(file) => file,
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => return Err(source),
+        };
+        let result = (|| {
+            file.write_all(contents)?;
+            file.sync_all()?;
+            fs::rename(&temporary_path, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        return result;
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique temporary metadata file",
+    ))
+}
+
 #[derive(Debug)]
 pub enum StateError {
     Io {
@@ -519,9 +692,9 @@ mod tests {
         state.mark_phase_running("default", LifecyclePhase::Create);
         state.complete_phase("default", LifecyclePhase::Create, PhaseStatus::Pass);
         state.enter_scenario("default/restart", Some("default".into()));
-        state.record_suite_result(
+        state.record_test_result(
             "default/restart",
-            SuiteResult {
+            TestResult {
                 name: "smoke".into(),
                 status: VerifierStatus::Pass,
                 message: None,
@@ -553,11 +726,67 @@ mod tests {
     }
 
     #[test]
-    fn defaults_state_to_the_configuration_directory() {
+    fn defaults_state_directory_to_the_configuration_directory() {
         assert_eq!(
-            default_state_path(Path::new("project/cvd.yml")),
-            PathBuf::from("project/.cvd/state.json")
+            default_state_directory(Path::new("project/cvd.yml")),
+            PathBuf::from("project/.cvd")
         );
+    }
+
+    #[test]
+    fn repository_retains_runs_and_updates_last_after_initial_state() {
+        let directory = unique_test_directory("repository");
+        let repository = StateRepository::new(&directory);
+        let first = test_state();
+        repository.start_run(&first).expect("start first run");
+        assert_eq!(
+            fs::read_to_string(directory.join("last-run")).expect("read pointer"),
+            "run-1\n"
+        );
+
+        let mut second = test_state();
+        second.run_id = "run-2".into();
+        repository.start_run(&second).expect("start second run");
+        let (resolved, store) = repository.open_run("last").expect("open last run");
+        assert_eq!(resolved, "run-2");
+        assert_eq!(store.load().expect("load last run"), second);
+        assert_eq!(
+            repository
+                .open_run("run-1")
+                .expect("first run is retained")
+                .1
+                .load()
+                .expect("load first run"),
+            first
+        );
+        assert!(matches!(
+            repository.start_run(&test_state()),
+            Err(StateRepositoryError::RunAlreadyExists { .. })
+        ));
+        fs::remove_dir_all(&directory).expect("remove only test directory");
+    }
+
+    #[test]
+    fn repository_rejects_unsafe_and_missing_run_ids() {
+        let directory = unique_test_directory("repository-errors");
+        let repository = StateRepository::new(&directory);
+        assert!(matches!(
+            repository.open_run("last"),
+            Err(StateRepositoryError::NoLastRun { .. })
+        ));
+        for unsafe_id in ["", ".", "..", "../run", "one/two", "one\\two"] {
+            assert!(matches!(
+                repository.open_run(unsafe_id),
+                Err(StateRepositoryError::InvalidRunId(_))
+            ));
+        }
+        assert!(matches!(
+            repository.open_run("does-not-exist"),
+            Err(StateRepositoryError::UnknownRun { .. })
+        ));
+        if directory.exists() {
+            fs::remove_dir_all(&directory).expect("remove only test directory");
+        }
     }
 
     #[test]

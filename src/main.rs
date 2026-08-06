@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod converger;
 mod lifecycle;
 mod provisioner;
 mod state;
@@ -9,7 +10,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     fs,
     hash::{Hash, Hasher},
-    io,
+    io::{self, IsTerminal, Write},
     path::PathBuf,
     process,
     time::{SystemTime, UNIX_EPOCH},
@@ -19,11 +20,12 @@ use clap::Parser;
 use thiserror::Error;
 
 use crate::{
-    cli::{Cli, Command, RunArgs},
+    cli::{Cli, Command, RunArgs, StateReportArgs, StateResourcesArgs, StateViewArgs, ViewFormat},
     config::Config,
-    lifecycle::{LifecycleError, LifecycleRunner},
+    converger::AnsibleConverger,
+    lifecycle::{LifecycleError, LifecycleRunner, render_state_report},
     provisioner::DummyProvisioner,
-    state::{RunState, StateError, StateStore, default_state_path},
+    state::{RunState, StateError, StateRepository, StateRepositoryError, default_state_directory},
     verifier::DummyVerifier,
 };
 
@@ -35,6 +37,8 @@ enum AppError {
     Lifecycle(#[from] LifecycleError),
     #[error(transparent)]
     State(#[from] StateError),
+    #[error(transparent)]
+    StateRepository(#[from] StateRepositoryError),
     #[error("cannot resolve configuration `{path}`: {source}")]
     Canonicalize {
         path: PathBuf,
@@ -47,8 +51,12 @@ enum AppError {
         #[source]
         source: io::Error,
     },
-    #[error("previous run was interrupted while `{scenario}` was in {phase}")]
-    Interrupted { scenario: String, phase: String },
+    #[error("could not render state view: {0}")]
+    RenderView(#[from] serde_yaml::Error),
+    #[error("could not write state view: {0}")]
+    WriteView(#[source] io::Error),
+    #[error("could not write state report: {0}")]
+    WriteReport(#[source] io::Error),
     #[error("run finished with {errors} error(s) and {failures} verifier failure(s)")]
     FailedRun { errors: usize, failures: usize },
 }
@@ -64,6 +72,9 @@ fn run_cli() -> Result<(), AppError> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => run(args),
+        Command::StateView(args) => state_view(args),
+        Command::StateResources(args) => state_resources(args),
+        Command::StateReport(args) => state_report(args),
     }
 }
 
@@ -78,50 +89,48 @@ fn run(args: RunArgs) -> Result<(), AppError> {
             path: configuration_path.clone(),
             source,
         })?;
-    let configuration = Config::from_yaml(&configuration_text)?;
-    let state_path = args
-        .state
-        .unwrap_or_else(|| default_state_path(&configuration_path));
-    let store = StateStore::new(state_path);
-
-    // Validate a prior state before replacing it.  A running phase is never
-    // retried implicitly: this command reports the interruption and leaves the
-    // state available for inspection instead.
-    if store.path().exists() {
-        let prior = store.load()?;
-        if let Some((scenario, phase)) = prior.scenarios.iter().find_map(|(path, scenario)| {
-            scenario
-                .phases
-                .iter()
-                .find(|(_, state)| state.status == state::PhaseStatus::Running)
-                .map(|(phase, _)| (path.clone(), format!("{phase:?}").to_lowercase()))
-        }) {
-            return Err(AppError::Interrupted { scenario, phase });
-        }
-    }
+    let configuration = Config::from_yaml_at(&configuration_text, &configuration_path)?;
+    let repository = StateRepository::new(
+        args.state_dir
+            .unwrap_or_else(|| default_state_directory(&configuration_path)),
+    );
 
     if let Some(selector) = args.scenario.as_deref()
         && configuration.scenario(selector).is_none()
     {
         return Err(LifecycleError::InvalidSelector(selector.to_owned()).into());
     }
+    let run_id = run_identifier();
     let state = RunState::new(
-        run_identifier(),
-        configuration_path,
-        fingerprint(&configuration_text),
+        run_id,
+        configuration_path.clone(),
+        fingerprint(configuration.source_material()),
         args.scenario.clone(),
         args.keep,
     );
+    // Publishing `last-run` happens only after this initial state is durable,
+    // making an interrupted newest run inspectable without overwriting history.
+    let store = repository.start_run(&state)?;
     let provisioner = DummyProvisioner;
+    let converger = AnsibleConverger::new(
+        configuration_path
+            .parent()
+            .expect("a canonical configuration path has a parent"),
+    );
     let verifier = DummyVerifier;
+    let output = io::stdout();
+    let styled_output =
+        terminal_styling_enabled(output.is_terminal(), std::env::var_os("NO_COLOR").is_some());
     let (outcome, _) = LifecycleRunner::new(
         &configuration,
         &store,
         state,
         &provisioner,
+        &converger,
         &verifier,
-        io::stdout(),
+        output,
     )
+    .with_styled_output(styled_output)
     .run(args.scenario.as_deref())?;
 
     if outcome.succeeded() {
@@ -132,6 +141,66 @@ fn run(args: RunArgs) -> Result<(), AppError> {
             failures: outcome.verifier_failures,
         })
     }
+}
+
+fn state_view(args: StateViewArgs) -> Result<(), AppError> {
+    let state_directory = args
+        .state_dir
+        .unwrap_or_else(|| default_state_directory(&args.file));
+    let repository = StateRepository::new(state_directory);
+    let (_, store) = repository.open_run(&args.run)?;
+    let state = store.load()?;
+    let view = match args.view {
+        ViewFormat::Yaml => serde_yaml::to_string(&state)?,
+        ViewFormat::Json => serde_json::to_string_pretty(&state)
+            .expect("RunState serialization uses only serializable fields"),
+    };
+    write_view(&view)
+}
+
+fn state_resources(args: StateResourcesArgs) -> Result<(), AppError> {
+    let state_directory = args
+        .state_dir
+        .unwrap_or_else(|| default_state_directory(&args.file));
+    let repository = StateRepository::new(state_directory);
+    let (_, store) = repository.open_run(&args.run)?;
+    let state = store.load()?;
+    let resources = state
+        .scenarios
+        .values()
+        .flat_map(|scenario| scenario.resources.resources.iter())
+        .filter(|resource| args.deleted || resource.exists)
+        .collect::<Vec<_>>();
+    let view = serde_yaml::to_string(&resources)?;
+    write_view(&view)
+}
+
+fn state_report(args: StateReportArgs) -> Result<(), AppError> {
+    let state_directory = args
+        .state_dir
+        .unwrap_or_else(|| default_state_directory(&args.file));
+    let repository = StateRepository::new(state_directory);
+    let (_, store) = repository.open_run(&args.run)?;
+    let state = store.load()?;
+    let output = io::stdout();
+    let styled_output =
+        terminal_styling_enabled(output.is_terminal(), std::env::var_os("NO_COLOR").is_some());
+    render_state_report(&state, output, styled_output).map_err(AppError::WriteReport)
+}
+
+fn write_view(view: &str) -> Result<(), AppError> {
+    let mut output = io::stdout().lock();
+    output
+        .write_all(view.as_bytes())
+        .map_err(AppError::WriteView)?;
+    if !view.ends_with('\n') {
+        output.write_all(b"\n").map_err(AppError::WriteView)?;
+    }
+    Ok(())
+}
+
+fn terminal_styling_enabled(is_terminal: bool, no_color_is_set: bool) -> bool {
+    is_terminal && !no_color_is_set
 }
 
 fn fingerprint(input: &str) -> String {
@@ -148,15 +217,25 @@ fn run_identifier() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("run-{}-{milliseconds}", process::id())
+    let sequence = NEXT_RUN_IDENTIFIER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("run-{}-{milliseconds}-{sequence}", process::id())
 }
+
+static NEXT_RUN_IDENTIFIER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {
-    use super::fingerprint;
+    use super::{fingerprint, terminal_styling_enabled};
 
     #[test]
     fn configuration_fingerprint_changes_with_content() {
         assert_ne!(fingerprint("version: 1"), fingerprint("version: 2"));
+    }
+
+    #[test]
+    fn terminal_styling_requires_a_terminal_without_no_color() {
+        assert!(terminal_styling_enabled(true, false));
+        assert!(!terminal_styling_enabled(false, false));
+        assert!(!terminal_styling_enabled(true, true));
     }
 }

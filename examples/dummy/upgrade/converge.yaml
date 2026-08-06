@@ -1,0 +1,7 @@
+- name: CVD upgrade converge stub
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Report upgrade converge
+      ansible.builtin.debug:
+        msg: CVD upgrade converge stub

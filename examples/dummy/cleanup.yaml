@@ -1,0 +1,7 @@
+- name: CVD cleanup stub
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Report cleanup
+      ansible.builtin.debug:
+        msg: CVD cleanup stub

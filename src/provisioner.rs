@@ -2,7 +2,9 @@
 
 use thiserror::Error;
 
-use crate::state::ResourceManifest;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::state::{LifecyclePhase, Resource, ResourceLocation, ResourceManifest};
 
 /// Creates and destroys resources owned by one scenario.
 pub trait Provisioner {
@@ -15,14 +17,31 @@ pub trait Provisioner {
     ) -> Result<(), ProvisionerError>;
 }
 
-/// The sole provisioner in the dummy stub.  It owns no resources and makes no
-/// external calls.
+/// The sole provisioner in the dummy stub. It models one loopback resource and
+/// makes no external calls.
 #[derive(Debug, Default)]
 pub struct DummyProvisioner;
 
 impl Provisioner for DummyProvisioner {
-    fn create(&self, _scenario_path: &str) -> Result<ResourceManifest, ProvisionerError> {
-        Ok(ResourceManifest::default())
+    fn create(&self, scenario_path: &str) -> Result<ResourceManifest, ProvisionerError> {
+        Ok(ResourceManifest {
+            resources: vec![Resource {
+                id: "dummy".to_owned(),
+                resource_type: "dummy".to_owned(),
+                exists: true,
+                created: ResourceLocation {
+                    scenario_path: scenario_path.to_owned(),
+                    phase: LifecyclePhase::Create,
+                },
+                destroyed: None,
+                attributes: BTreeMap::from([(
+                    "ipv6".to_owned(),
+                    serde_json::Value::String("::1".to_owned()),
+                )]),
+                relationships: BTreeSet::new(),
+                sensitive_attributes: BTreeSet::new(),
+            }],
+        })
     }
 
     fn destroy(

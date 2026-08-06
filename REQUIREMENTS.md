@@ -8,7 +8,7 @@ CVD (Create-Verify-Destroy) is a test tool for iaac (infrastructural code):
   `ansible.cfg`;
 - standalone Ansible roles;
 - Ansible collections; and
-- nested test scenarios with side effects and multiple verification suites.
+- nested test scenarios with side effects and multiple tests.
 
 CVD coordinates lifecycle actions. It does not prescribe how infrastructure is
 provisioned or introduce its own infrastructure definition language.
@@ -29,6 +29,12 @@ scenarios to arbitrary depth and can define any of these optional phases:
 7. child scenarios
 8. `cleanup`
 9. `destroy`
+
+Each scenario explicitly declares the phases it enables as keys. Omitted phase
+keys are recorded as skipped. A present phase value may be null, a scalar, one
+adapter mapping, or an ordered list. Phase values are
+opaque adapter input; null and scalar values use the applicable default. Each
+adapter mapping contains exactly one adapter name and its input.
 
 A child scenario inherits its parent's state and resources. It can add
 resources and state values of its own. Its cleanup and destruction affect
@@ -83,6 +89,9 @@ Every resource has:
 - a type;
 - an owning scenario; (responsible for creation/destruction)
 - structured attributes;
+- whether it currently exists;
+- the scenario and phase where it was created;
+- the scenario and phase where it was destroyed, when applicable;
 - optional relationships to other resources; and
 - optional sensitive attributes (e.g. passwords).
 
@@ -119,16 +128,27 @@ enumeration of resources for a given scenario.
 
 Children inherit the parent state and can reference parent resources.
 
-### Test suite
+### Test
 
-A **test suite** is a named collection of verifier invocations. A scenario can
-run one or more suites.
+A **test** is a named verifier invocation. A scenario can define one or more
+tests under its `tests` mapping.
 
 The initially supported verifier types are:
 
 - `ansible`: run an Ansible verification playbook;
 - `pytest`: execute pytest and interpret its test results; and
 - `exec`: execute a command and interpret its exit status.
+
+Provisioner, converger, and verifier defaults are declared at configuration
+top level. A named adapter in a phase value, and a verifier on an individual
+test, override the applicable default.
+
+Child scenarios are declared in an ordered `nested` list. Each entry has a
+`name` and either an inline scenario body or an `include` path. An included file
+contains one scenario body, is resolved relative to the file containing the
+include, and cannot be combined with inline phases, tests, or children on the
+same entry. Scenario names remain the components of stable slash-separated
+selectors.
 
 ## Provisioning
 
@@ -181,6 +201,23 @@ name.
 For collection tests, CVD must be able to install or link the collection into
 an isolated Ansible collection path without requiring global installation.
 Temporary isolation must not modify the source project.
+
+### Initial Ansible converger
+
+The initial Ansible converger handles `prepare`, `converge`, `idempotence`, and
+`cleanup`. Its parameters identify playbooks:
+
+- null selects `<phase>.yaml` or `<phase>.yml` beside the scenario file;
+- a string selects one playbook; and
+- a list of strings selects playbooks in order.
+
+Finding both default extensions is an ambiguity error. Finding neither default
+or any explicitly named playbook is an error. These checks happen while loading
+configuration, before a run and its state are created. Paths in included
+scenario fragments are relative to the included file. CVD passes the resolved
+playbook path to `ansible-playbook` and sets its working directory to the
+directory containing the root `cvd.yml`. Failure to start the process or a
+non-zero exit is a phase `error`.
 
 ## Execution and selection
 
@@ -275,6 +312,18 @@ CVD persists enough state to support inspection, cleanup, and reruns:
 - cleanup and destruction status.
 
 Sensitive values are redacted from logs and reports.
+
+Interactive run output groups phases under a single scenario entrance header.
+Entrance and verdict lines begin with `Scenario: `; for example,
+`Scenario: default/restart` and `Scenario: default/restart: passed`. The full
+entrance and verdict lines are bold, and each scenario ends with a `passed`,
+`error`, or `skipped` verdict. Passed phase and verdict lines are green, error
+lines are red, and skipped lines are gray. Redirected output and output produced
+with `NO_COLOR` set contain no ANSI styling.
+
+`state-report` replays this scenario-grouped report from one persisted run. It
+does not execute lifecycle actions or parse the current configuration, and it
+reports persisted `pending` or `running` phase states without retrying them.
 
 ## Initial non-goals
 

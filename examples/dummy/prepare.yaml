@@ -1,0 +1,7 @@
+- name: CVD prepare stub
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Report prepare
+      ansible.builtin.debug:
+        msg: CVD prepare stub

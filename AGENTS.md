@@ -23,8 +23,9 @@ Use these terms consistently:
 - **state**: persisted resources, configuration, paths, phase status, and test
   results;
 - **view**: a concrete representation of state for another tool;
-- **test suite**: a named collection of verifier invocations;
+- **test**: a named verifier invocation;
 - **provisioner**: an implementation that creates and destroys resources; and
+- **converger**: an implementation that applies scenario state changes; and
 - **verifier**: an Ansible, pytest, or executable test adapter.
 
 Model a side effect as a child scenario whose `converge` performs the mutation.
@@ -33,6 +34,10 @@ Do not add a separate side-effect lifecycle unless requirements change.
 ## Product constraints
 
 - Preserve existing project configuration by default.
+- Require each scenario to declare enabled phases as keys. Phase values are
+  opaque adapter input; record omitted phase keys as skipped.
+- Use top-level provisioner, converger, and verifier values as defaults, with
+  optional narrower overrides.
 - Keep the core resource model broader than Ansible inventory hosts.
 - Keep provisioner configuration opaque to CVD. Provisioners return resource
   information through the process protocol; its exact format is deferred.
@@ -41,6 +46,10 @@ Do not add a separate side-effect lifecycle unless requirements change.
 - Treat built-in JSON and YAML state views as the base interchange forms. CVD,
   provisioners, or user scripts can provide additional application-specific
   views such as Ansible inventory, `kube.conf`, or `clouds.yml`.
+- Persist each run independently and expose `last` as the most recently
+  started run; never overwrite run history during normal execution.
+- Persist resource existence and create/destroy provenance. `state-resources`
+  hides destroyed resources unless `--deleted` is requested.
 - Design cleanup for partial setup, failed convergence, failed verification,
   interruption, and interactive reruns.
 - Use `skipped`, `pass`, and `error` for phase results. Verifiers can additionally
@@ -48,11 +57,19 @@ Do not add a separate side-effect lifecycle unless requirements change.
   unless `fails_are_fatal` is configured. Always retain the originating scenario
   path and lifecycle phase for errors.
 - Favor explicit, inspectable state and stable selectors over hidden behavior.
+- Group interactive phase output under one bold entrance per scenario and emit
+  a closing scenario verdict; keep redirected output free of ANSI styling.
 - Treat stopping, retaining state, repeating a phase, forcing a phase
   transition, and cleaning up from the current phase as core interactive
   capabilities.
 - Keep sibling scenarios independent. Selecting a nested scenario runs only the
   ancestor setup chain needed to reach it and skips unrelated siblings.
+- Represent children as an ordered `nested` list with named inline scenarios or
+  relative scenario-fragment includes.
+- Resolve Ansible converger playbooks at configuration load time relative to
+  the containing scenario file; reject missing or ambiguous default playbooks.
+- Run `ansible-playbook` with resolved paths from the root configuration
+  directory; classify launch failures and non-zero exits as phase errors.
 - Run remaining applicable cleanup and destroy operations after an error in
   cleanup or destroy, while skipping later child, converge, and verify work.
 - Allow explicit keep mode to suppress cleanup or destruction for inspection.

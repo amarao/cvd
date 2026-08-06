@@ -1,31 +1,52 @@
 version: 1
+
+provisioner: dummy
+converger: ansible
+verifier: dummy
+
 scenarios:
   default:
-    provisioner: dummy
-    suites:
-      smoke:
-        verifier: dummy
-      regression:
-        verifier: dummy
-    scenarios:
-      restart:
-        provisioner: dummy
-        suites:
-          after-restart:
-            verifier: dummy
-        scenarios:
-          configuration-check:
-            provisioner: dummy
-            suites:
-              nested-smoke:
-                verifier: dummy
-      upgrade:
-        provisioner: dummy
-        suites:
-          after-upgrade:
-            verifier: dummy
+    dependency:
+    create:
+    prepare:
+    converge:
+    idempotence:
+    verify:
+    cleanup:
+    destroy:
+    tests:
+      smoke: {}
+      regression: {}
+    nested:
+      - name: install
+        create:
+          terraform: tf/vms
+        destroy:
+        prepare:
+          - ansible: prepare.yaml
+        converge:
+        verify:
+        cleanup:
+        tests:
+          after-restart: {}
+        nested:
+          - name: configuration-check
+            prepare:
+              - ansible: conf_prepare.yaml
+            converge: bad_config.yaml
+            verify:
+              - pytest: test_rejected_bad_config/
+            cleanup:
+              - exec: rm bad_config
+            tests:
+              nested-smoke: {}
+          - name: Upgrade scenario
+            include: upgrade/cvd.yaml
   independent:
-    provisioner: dummy
-    suites:
-      standalone-smoke:
-        verifier: dummy
+    create:
+    prepare:
+    converge:
+    verify:
+    destroy:
+    tests:
+      standalone-smoke: {}

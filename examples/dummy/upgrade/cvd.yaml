@@ -1,0 +1,6 @@
+create:
+converge:
+verify:
+destroy:
+tests:
+  after-upgrade: {}
