@@ -1,0 +1,10 @@
+---
+- name: Inspect the provisioned resource
+  hosts: mygroup2
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Report the provisioned resources
+      ansible.builtin.debug:
+        msg: Resources created by CVD are available
+    - debug: var=ansible_host

@@ -39,8 +39,10 @@ Do not add a separate side-effect lifecycle unless requirements change.
 - Use top-level provisioner, converger, and verifier values as defaults, with
   optional narrower overrides.
 - Keep the core resource model broader than Ansible inventory hosts.
-- Keep provisioner configuration opaque to CVD. Provisioners return resource
-  information through the process protocol; its exact format is deferred.
+- Preserve resource and inventory host ordering from provisioner input.
+- Keep provisioner configuration opaque to the lifecycle core; each built-in
+  adapter owns its schema. Third-party provisioners return resource information
+  through the process protocol, whose exact format is deferred.
 - Child scenarios inherit parent state and resources, can mask parent resources,
   and own only the resources they add.
 - Treat built-in JSON and YAML state views as the base interchange forms. CVD,
@@ -70,6 +72,11 @@ Do not add a separate side-effect lifecycle unless requirements change.
   the containing scenario file; reject missing or ambiguous default playbooks.
 - Run `ansible-playbook` with resolved paths from the root configuration
   directory; classify launch failures and non-zero exits as phase errors.
+- For an Ansible `create`, treat the phase mapping apart from `ansible` options
+  as generated inventory. Select resources using its configured group name or
+  dotted path, pass that inventory through `ANSIBLE_INVENTORY` to later Ansible
+  phases, merge facts from successful `set_fact` tasks into host attributes, and
+  use `public_ip` as `ansible_host` when no explicit host address exists.
 - Run remaining applicable cleanup and destroy operations after an error in
   cleanup or destroy, while skipping later child, converge, and verify work.
 - Allow explicit keep mode to suppress cleanup or destruction for inspection.

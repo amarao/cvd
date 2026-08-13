@@ -15,7 +15,8 @@ pub const CONFIG_VERSION: u32 = 1;
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     version: u32,
-    provisioner: String,
+    #[serde(default)]
+    provisioner: Option<String>,
     converger: String,
     verifier: String,
     scenarios: NamedMap<RawScenario>,
@@ -56,12 +57,33 @@ impl Scenario {
 pub(crate) struct PhaseDefinition {
     _value: serde_yaml::Value,
     ansible_playbooks: Vec<PathBuf>,
+    ansible_create: Option<AnsibleCreateDefinition>,
 }
 
 impl PhaseDefinition {
     pub(crate) fn ansible_playbooks(&self) -> &[PathBuf] {
         &self.ansible_playbooks
     }
+
+    pub(crate) fn ansible_create(&self) -> Option<&AnsibleCreateDefinition> {
+        self.ansible_create.as_ref()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct AnsibleCreateDefinition {
+    pub(crate) playbook: PathBuf,
+    pub(crate) group: String,
+    pub(crate) hosts_path: Vec<String>,
+    pub(crate) inventory: serde_json::Value,
+    pub(crate) resources: IndexMap<String, BTreeMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAnsibleCreate {
+    playbook: String,
+    group: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -311,7 +333,7 @@ impl Config {
             None,
         )?;
         let config = Self {
-            provisioner: raw.provisioner,
+            provisioner: raw.provisioner.unwrap_or_else(|| "dummy".to_owned()),
             converger: raw.converger,
             verifier: raw.verifier,
             scenarios,
@@ -424,11 +446,22 @@ fn resolve_scenario(
         let Some(value) = value.0 else {
             continue;
         };
-        validate_phase_value(&value).map_err(|reason| ConfigError::InvalidPhase {
-            scenario: path.to_owned(),
-            phase: configured_phase_name(phase),
-            reason,
-        })?;
+        let ansible_create = if phase == ConfiguredPhase::Create {
+            resolve_ansible_create(&value, base).map_err(|reason| ConfigError::InvalidPhase {
+                scenario: path.to_owned(),
+                phase: configured_phase_name(phase),
+                reason,
+            })?
+        } else {
+            None
+        };
+        if ansible_create.is_none() {
+            validate_phase_value(&value).map_err(|reason| ConfigError::InvalidPhase {
+                scenario: path.to_owned(),
+                phase: configured_phase_name(phase),
+                reason,
+            })?;
+        }
         let ansible_playbooks = resolve_ansible_playbooks(phase, &value, default_converger, base)
             .map_err(|reason| ConfigError::InvalidPhase {
             scenario: path.to_owned(),
@@ -440,6 +473,7 @@ fn resolve_scenario(
             PhaseDefinition {
                 _value: value,
                 ansible_playbooks,
+                ansible_create,
             },
         );
     }
@@ -528,14 +562,6 @@ fn validate_scenarios(
             path: path.clone(),
             reason,
         })?;
-        for (phase, definition) in &scenario.phases {
-            validate_phase_value(&definition._value).map_err(|reason| {
-                ConfigError::InvalidScenario {
-                    path: path.clone(),
-                    reason: format!("invalid {} phase: {reason}", configured_phase_name(*phase)),
-                }
-            })?;
-        }
         for (test_name, test) in scenario.tests.iter() {
             let test_path = format!("{path}::{test_name}");
             validate_name(test_name).map_err(|reason| ConfigError::InvalidTest {
@@ -608,6 +634,106 @@ fn validate_action_mapping(mapping: &serde_yaml::Mapping) -> Result<(), String> 
     validate_implementation(adapter)
 }
 
+fn resolve_ansible_create(
+    value: &serde_yaml::Value,
+    base: Option<&Path>,
+) -> Result<Option<AnsibleCreateDefinition>, String> {
+    let serde_yaml::Value::Mapping(mapping) = value else {
+        return Ok(None);
+    };
+    let ansible_key = serde_yaml::Value::String("ansible".to_owned());
+    let Some(raw_ansible) = mapping.get(&ansible_key) else {
+        return Ok(None);
+    };
+    let ansible: RawAnsibleCreate = serde_yaml::from_value(raw_ansible.clone())
+        .map_err(|error| format!("invalid Ansible provisioner options: {error}"))?;
+    let playbook = resolve_playbook(&ansible.playbook, base)?;
+
+    let mut inventory_mapping = mapping.clone();
+    inventory_mapping.remove(&ansible_key);
+    if inventory_mapping.is_empty() {
+        return Err("Ansible create requires inline inventory data".to_owned());
+    }
+    let source_inventory = serde_yaml::Value::Mapping(inventory_mapping);
+    let group = ansible.group.clone();
+    let segments = group.split('.').map(str::to_owned).collect::<Vec<_>>();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return Err(
+            "Ansible create group must be a group name or dotted inventory path".to_owned(),
+        );
+    }
+    let selected = if segments.len() == 1 {
+        let resources = source_inventory
+            .get("resources")
+            .and_then(|value| value.get("hosts"))
+            .ok_or_else(|| {
+                "Ansible create group name requires `resources.hosts` inventory".to_owned()
+            })?;
+        resources.clone()
+    } else {
+        let mut selected = &source_inventory;
+        for segment in &segments {
+            let serde_yaml::Value::Mapping(mapping) = selected else {
+                return Err(format!(
+                    "inventory path `{}` is not a mapping",
+                    ansible.group
+                ));
+            };
+            selected = mapping
+                .get(serde_yaml::Value::String(segment.clone()))
+                .ok_or_else(|| format!("inventory path `{}` does not exist", ansible.group))?;
+        }
+        selected.clone()
+    };
+    let serde_yaml::Value::Mapping(hosts) = &selected else {
+        return Err(format!(
+            "inventory path `{}` is not a host mapping",
+            ansible.group
+        ));
+    };
+    let mut resources = IndexMap::new();
+    for (host, variables) in hosts {
+        let serde_yaml::Value::String(host) = host else {
+            return Err("resource inventory host names must be strings".to_owned());
+        };
+        let attributes = match variables {
+            serde_yaml::Value::Null => BTreeMap::new(),
+            serde_yaml::Value::Mapping(_) => serde_json::from_value(
+                serde_json::to_value(variables)
+                    .map_err(|error| format!("cannot encode variables for `{host}`: {error}"))?,
+            )
+            .map_err(|error| format!("invalid variables for `{host}`: {error}"))?,
+            _ => return Err(format!("variables for resource `{host}` must be a mapping")),
+        };
+        resources.insert(host.clone(), attributes);
+    }
+    let inventory_value = if segments.len() == 1 {
+        let mut group = serde_yaml::Mapping::new();
+        group.insert(serde_yaml::Value::String("hosts".to_owned()), selected);
+        let mut inventory = serde_yaml::Mapping::new();
+        inventory.insert(
+            serde_yaml::Value::String(ansible.group.clone()),
+            serde_yaml::Value::Mapping(group),
+        );
+        serde_yaml::Value::Mapping(inventory)
+    } else {
+        source_inventory
+    };
+    let inventory = serde_json::to_value(&inventory_value)
+        .map_err(|error| format!("cannot encode Ansible inventory: {error}"))?;
+    Ok(Some(AnsibleCreateDefinition {
+        playbook,
+        group,
+        hosts_path: if segments.len() == 1 {
+            vec![segments[0].clone(), "hosts".to_owned()]
+        } else {
+            segments
+        },
+        inventory,
+        resources,
+    }))
+}
+
 fn resolve_ansible_playbooks(
     phase: ConfiguredPhase,
     value: &serde_yaml::Value,
@@ -620,6 +746,7 @@ fn resolve_ansible_playbooks(
             | ConfiguredPhase::Converge
             | ConfiguredPhase::Idempotence
             | ConfiguredPhase::Cleanup
+            | ConfiguredPhase::Destroy
     ) {
         return Ok(Vec::new());
     }
@@ -650,8 +777,32 @@ fn resolve_ansible_playbooks(
             }
             Ok(playbooks)
         }
+        _ if default_converger == "ansible" && phase == ConfiguredPhase::Destroy => {
+            resolve_optional_default_playbook(phase, value, base)
+        }
         _ if default_converger == "ansible" => resolve_playbook_parameters(value, phase, base),
         _ => Ok(Vec::new()),
+    }
+}
+
+fn resolve_optional_default_playbook(
+    phase: ConfiguredPhase,
+    value: &serde_yaml::Value,
+    base: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    if !matches!(value, serde_yaml::Value::Null) {
+        return resolve_playbook_parameters(value, phase, base);
+    }
+    let base = base.unwrap_or_else(|| Path::new("."));
+    let yaml = base.join(format!("{}.yaml", configured_phase_name(phase)));
+    let yml = base.join(format!("{}.yml", configured_phase_name(phase)));
+    match (yaml.is_file(), yml.is_file()) {
+        (true, false) => Ok(vec![resolve_playbook("destroy.yaml", Some(base))?]),
+        (false, true) => Ok(vec![resolve_playbook("destroy.yml", Some(base))?]),
+        (true, true) => {
+            Err("both default destroy playbooks `destroy.yaml` and `destroy.yml` exist".to_owned())
+        }
+        (false, false) => Ok(Vec::new()),
     }
 }
 
@@ -931,6 +1082,43 @@ scenarios:
                 .scenario("default/install/Upgrade scenario")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn minimal_provisioner_example_uses_one_scenario_and_only_its_enabled_phases() {
+        let path = fs::canonicalize("examples/minimal-provisioner/cvd.yml").unwrap();
+        let yaml = fs::read_to_string(&path).unwrap();
+        let config = Config::from_yaml_at(&yaml, &path).unwrap();
+
+        assert_eq!(config.scenarios.iter().count(), 1);
+        assert_eq!(config.provisioner, "dummy");
+        let scenario = config.scenario("provisioned-resource").unwrap();
+        for phase in [
+            ConfiguredPhase::Create,
+            ConfiguredPhase::Converge,
+            ConfiguredPhase::Verify,
+            ConfiguredPhase::Destroy,
+        ] {
+            assert!(scenario.has_phase(phase));
+        }
+        for phase in [
+            ConfiguredPhase::Dependency,
+            ConfiguredPhase::Prepare,
+            ConfiguredPhase::Idempotence,
+            ConfiguredPhase::Cleanup,
+        ] {
+            assert!(!scenario.has_phase(phase));
+        }
+        assert!(scenario.scenarios.iter().next().is_none());
+        let create = scenario
+            .phase(ConfiguredPhase::Create)
+            .unwrap()
+            .ansible_create()
+            .unwrap();
+        assert_eq!(create.group, "mygroup2");
+        assert_eq!(create.resources["vm1"]["flavor"], "SSD.30");
+        assert_eq!(create.resources["vm2"]["flavor"], "SSD.40");
+        assert_eq!(create.playbook, path.parent().unwrap().join("create.yaml"));
     }
 
     #[test]

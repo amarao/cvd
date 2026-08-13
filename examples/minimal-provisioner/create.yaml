@@ -1,0 +1,11 @@
+---
+- name: Create host resources
+  hosts: mygroup2
+  gather_facts: false
+  tasks:
+    - name: Create the instance
+      ansible.builtin.debug:
+        msg: calling openstack api to create an instance {{ inventory_hostname }}
+    - name: Publish resource attributes to CVD
+      ansible.builtin.set_fact:
+        public_ip: "127.0.0.{{ 55 + ansible_play_hosts.index(inventory_hostname) }}"

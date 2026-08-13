@@ -155,7 +155,13 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             {
                 return true;
             }
-            let resources = match self.provisioner.create(path) {
+            if self.write_phase_running(&LifecyclePhase::Create).is_err() {
+                return true;
+            }
+            let definition = scenario
+                .phase(ConfiguredPhase::Create)
+                .expect("create phase presence was checked");
+            let resources = match self.provisioner.create(path, definition) {
                 Ok(resources) => resources,
                 Err(error) => {
                     self.execution_error(path, LifecyclePhase::Create, error.to_string());
@@ -234,6 +240,9 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         {
             return true;
         }
+        if self.write_phase_running(&LifecyclePhase::Verify).is_err() {
+            return true;
+        }
 
         for (test_name, _) in scenario.tests.iter() {
             match self.verifier.verify(path, test_name) {
@@ -290,7 +299,21 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         let persistence_error = self
             .persist_or_record(path, LifecyclePhase::Destroy)
             .is_err();
-        match self.provisioner.destroy(path, &resources) {
+        // The provider is still called when either reporting step fails; this
+        // preserves best-effort destruction.
+        let _ = self.write_phase_running(&LifecyclePhase::Destroy);
+        let definition = scenario
+            .phase(ConfiguredPhase::Destroy)
+            .expect("destroy phase presence was checked");
+        let inventory = self.ansible_inventory(scenario, path);
+        match self.provisioner.destroy(
+            path,
+            &resources,
+            definition.ansible_playbooks(),
+            inventory.as_ref(),
+            &mut self.output,
+            self.styled_output,
+        ) {
             Ok(()) => {
                 self.state.mark_resources_destroyed(path);
                 let completion_error = self
@@ -332,28 +355,52 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         if self.persist_or_record(path, phase.clone()).is_err() {
             return true;
         }
+        if self.write_phase_running(&phase).is_err() {
+            return true;
+        }
         let definition = scenario
             .phase(configured_phase(&phase))
             .expect("enabled converger phases have a definition");
-        let indent = phase_indent(path);
-        for playbook in definition.ansible_playbooks() {
-            if writeln!(
-                self.output,
-                "{indent}ansible-playbook {}",
-                playbook.display()
-            )
-            .is_err()
-            {
-                return true;
-            }
-        }
-        match self.converger.run(path, phase.clone(), definition) {
+        let inventory = self.ansible_inventory(scenario, path);
+        match self.converger.run(
+            path,
+            phase.clone(),
+            definition,
+            inventory.as_ref(),
+            &mut self.output,
+            self.styled_output,
+        ) {
             Ok(()) => self.complete(path, phase, PhaseStatus::Pass).is_err(),
             Err(error) => {
                 self.execution_error(path, phase, error.to_string());
                 true
             }
         }
+    }
+
+    fn ansible_inventory(&self, scenario: &Scenario, path: &str) -> Option<serde_json::Value> {
+        let create = scenario
+            .phase(ConfiguredPhase::Create)
+            .and_then(|definition| definition.ansible_create())?;
+        let mut inventory = create.inventory.clone();
+        let mut selected = &mut inventory;
+        for segment in &create.hosts_path {
+            selected = selected.get_mut(segment)?;
+        }
+        let hosts = selected.as_object_mut()?;
+        let resources = self.state.scenarios.get(path)?.resources.resources.iter();
+        for resource in resources {
+            let host = hosts.get_mut(&resource.id)?.as_object_mut()?;
+            for (name, value) in &resource.attributes {
+                host.insert(name.clone(), value.clone());
+            }
+            if !host.contains_key("ansible_host")
+                && let Some(public_ip) = resource.attributes.get("public_ip")
+            {
+                host.insert("ansible_host".to_owned(), public_ip.clone());
+            }
+        }
+        Some(inventory)
     }
 
     fn execution_error(&mut self, path: &str, phase: LifecyclePhase, message: String) {
@@ -387,6 +434,10 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
 
     fn write_scenario_entrance(&mut self, path: &str) -> Result<(), LifecycleError> {
         write_scenario_entrance(&mut self.output, path, self.styled_output).map_err(Into::into)
+    }
+
+    fn write_phase_running(&mut self, phase: &LifecyclePhase) -> Result<(), LifecycleError> {
+        writeln!(&mut self.output, "{} running", phase_name(phase)).map_err(Into::into)
     }
 
     fn write_scenario_verdict(
@@ -504,22 +555,17 @@ fn write_summary<W: Write>(
 
 fn write_phase_result<W: Write>(
     output: &mut W,
-    path: &str,
+    _path: &str,
     phase: &LifecyclePhase,
     status: &PhaseStatus,
     styled_output: bool,
 ) -> std::io::Result<()> {
-    let indent = phase_indent(path);
     let phase = phase_name(phase);
     let status = status_name(status);
     if styled_output {
-        writeln!(
-            output,
-            "{indent}{}{phase} {status}\x1b[0m",
-            result_color(status)
-        )
+        writeln!(output, "{}{phase} {status}\x1b[0m", result_color(status))
     } else {
-        writeln!(output, "{indent}{phase} {status}")
+        writeln!(output, "{phase} {status}")
     }
 }
 
@@ -528,11 +574,10 @@ fn write_scenario_entrance<W: Write>(
     path: &str,
     styled_output: bool,
 ) -> std::io::Result<()> {
-    let indent = scenario_indent(path);
     if styled_output {
-        writeln!(output, "{indent}\x1b[1mScenario: {path}\x1b[0m")
+        writeln!(output, "\x1b[1mScenario: {path}\x1b[0m")
     } else {
-        writeln!(output, "{indent}Scenario: {path}")
+        writeln!(output, "Scenario: {path}")
     }
 }
 
@@ -544,15 +589,14 @@ fn write_scenario_verdict<W: Write>(
     styled_output: bool,
 ) -> std::io::Result<()> {
     let verdict = scenario_verdict(state, path, had_error);
-    let indent = scenario_indent(path);
     if styled_output {
         writeln!(
             output,
-            "{indent}{}\x1b[1mScenario: {path}: {verdict}\x1b[0m",
+            "{}\x1b[1mScenario: {path}: {verdict}\x1b[0m",
             result_color(verdict)
         )
     } else {
-        writeln!(output, "{indent}Scenario: {path}: {verdict}")
+        writeln!(output, "Scenario: {path}: {verdict}")
     }
 }
 
@@ -618,14 +662,6 @@ fn persisted_outcome(state: &RunState) -> RunOutcome {
                 }),
         ),
     }
-}
-
-fn scenario_indent(path: &str) -> String {
-    "  ".repeat(path.matches('/').count())
-}
-
-fn phase_indent(path: &str) -> String {
-    "  ".repeat(path.matches('/').count() + 1)
 }
 
 fn configured_phase(phase: &LifecyclePhase) -> ConfiguredPhase {
@@ -848,9 +884,34 @@ scenarios:
         assert!(!output.contains("\x1b["));
         assert!(output.contains("Scenario: default\n"));
         assert!(output.contains("Scenario: default: passed"));
-        let create = output.find("  create pass").unwrap();
-        let prepare = output.find("  prepare pass").unwrap();
+        assert!(output.contains("create running\n"));
+        assert!(output.contains("converge running\n"));
+        let create = output.find("create pass").unwrap();
+        let prepare = output.find("prepare pass").unwrap();
         assert!(create < prepare);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn running_phase_lines_are_plain_even_in_styled_output() {
+        let config = Config::from_yaml(CONFIG).unwrap();
+        let (store, directory) = test_store("running-phase-output");
+        let bytes = Rc::new(RefCell::new(Vec::new()));
+        LifecycleRunner::new(
+            &config,
+            &store,
+            state(Some("default"), false),
+            &DummyProvisioner,
+            &DummyConverger,
+            &DummyVerifier,
+            SharedWriter(bytes.clone()),
+        )
+        .with_styled_output(true)
+        .run(Some("default"))
+        .unwrap();
+        let output = String::from_utf8(bytes.borrow().clone()).unwrap();
+        assert!(output.contains("create running\n"));
+        assert!(!output.contains("\x1b[32mcreate running"));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -885,7 +946,7 @@ scenarios:
 
         let output = String::from_utf8(bytes.borrow().clone()).unwrap();
         assert_eq!(output.matches("\x1b[1mScenario: empty\x1b[0m").count(), 1);
-        assert!(output.contains("  \x1b[90mdependency skipped\x1b[0m\n"));
+        assert!(output.contains("\x1b[90mdependency skipped\x1b[0m\n"));
         assert!(output.contains("\x1b[90m\x1b[1mScenario: empty: skipped\x1b[0m\n"));
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -909,7 +970,7 @@ scenarios:
         .unwrap();
 
         let output = String::from_utf8(bytes.borrow().clone()).unwrap();
-        assert!(output.contains("  \x1b[32mcreate pass\x1b[0m\n"));
+        assert!(output.contains("\x1b[32mcreate pass\x1b[0m\n"));
         assert!(output.contains("\x1b[32m\x1b[1mScenario: independent: passed\x1b[0m\n"));
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -935,21 +996,19 @@ scenarios:
         let report = String::from_utf8(report).unwrap();
         assert!(!report.contains("\x1b["));
         assert!(report.contains("Scenario: default\n"));
-        assert!(report.contains("  dependency skipped\n"));
-        assert!(report.contains("  Scenario: default/restart\n"));
-        assert!(report.contains("    create pass\n"));
-        assert!(report.contains("    Scenario: default/restart/deep\n"));
-        assert!(report.contains("      destroy pass\n"));
-        assert!(report.contains("    Scenario: default/restart/deep: passed\n"));
-        assert!(report.contains("  Scenario: default/restart: passed\n"));
+        assert!(report.contains("dependency skipped\n"));
+        assert!(report.contains("Scenario: default/restart\n"));
+        assert!(report.contains("create pass\n"));
+        assert!(report.contains("Scenario: default/restart/deep\n"));
+        assert!(report.contains("destroy pass\n"));
+        assert!(report.contains("Scenario: default/restart/deep: passed\n"));
+        assert!(report.contains("Scenario: default/restart: passed\n"));
         assert!(report.contains("Scenario: default: passed\n"));
-        let parent_verify = report.find("  verify skipped\n").unwrap();
-        let child_entrance = report.find("  Scenario: default/restart\n").unwrap();
-        let child_verdict = report
-            .find("  Scenario: default/restart: passed\n")
-            .unwrap();
-        let parent_cleanup = report.rfind("  cleanup pass\n").unwrap();
-        let parent_destroy = report.rfind("  destroy pass\n").unwrap();
+        let parent_verify = report.find("verify skipped\n").unwrap();
+        let child_entrance = report.find("Scenario: default/restart\n").unwrap();
+        let child_verdict = report.find("Scenario: default/restart: passed\n").unwrap();
+        let parent_cleanup = report.rfind("cleanup pass\n").unwrap();
+        let parent_destroy = report.rfind("destroy pass\n").unwrap();
         let parent_verdict = report.rfind("Scenario: default: passed\n").unwrap();
         assert!(parent_verify < child_entrance);
         assert!(child_entrance < child_verdict);
@@ -972,9 +1031,9 @@ scenarios:
         render_state_report(&run_state, &mut report, true).unwrap();
         let report = String::from_utf8(report).unwrap();
         assert!(report.contains("\x1b[1mScenario: empty\x1b[0m\n"));
-        assert!(report.contains("  \x1b[90mdependency skipped\x1b[0m\n"));
-        assert!(report.contains("  \x1b[32mcreate pass\x1b[0m\n"));
-        assert!(report.contains("  converge running\x1b[0m\n"));
+        assert!(report.contains("\x1b[90mdependency skipped\x1b[0m\n"));
+        assert!(report.contains("\x1b[32mcreate pass\x1b[0m\n"));
+        assert!(report.contains("converge running\x1b[0m\n"));
         assert!(report.contains("\x1b[31m\x1b[1mScenario: empty: error\x1b[0m\n"));
     }
 
@@ -1036,7 +1095,11 @@ scenarios:
     }
 
     impl Provisioner for PersistencePoisoningProvisioner {
-        fn create(&self, scenario_path: &str) -> Result<ResourceManifest, ProvisionerError> {
+        fn create(
+            &self,
+            scenario_path: &str,
+            _: &crate::config::PhaseDefinition,
+        ) -> Result<ResourceManifest, ProvisionerError> {
             self.calls
                 .borrow_mut()
                 .push(format!("create:{scenario_path}"));
@@ -1052,6 +1115,10 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &ResourceManifest,
+            _: &[std::path::PathBuf],
+            _: Option<&serde_json::Value>,
+            _: &mut dyn std::io::Write,
+            _: bool,
         ) -> Result<(), ProvisionerError> {
             self.calls
                 .borrow_mut()
@@ -1094,7 +1161,11 @@ scenarios:
     struct FailingCreateProvisioner(RefCell<Vec<String>>);
 
     impl Provisioner for FailingCreateProvisioner {
-        fn create(&self, scenario_path: &str) -> Result<ResourceManifest, ProvisionerError> {
+        fn create(
+            &self,
+            scenario_path: &str,
+            _: &crate::config::PhaseDefinition,
+        ) -> Result<ResourceManifest, ProvisionerError> {
             self.0.borrow_mut().push(format!("create:{scenario_path}"));
             Err(ProvisionerError("create failed".into()))
         }
@@ -1103,6 +1174,10 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &ResourceManifest,
+            _: &[std::path::PathBuf],
+            _: Option<&serde_json::Value>,
+            _: &mut dyn std::io::Write,
+            _: bool,
         ) -> Result<(), ProvisionerError> {
             self.0.borrow_mut().push(format!("destroy:{scenario_path}"));
             Ok(())
@@ -1148,7 +1223,7 @@ scenarios:
             ["create:default", "destroy:default"]
         );
         let output = String::from_utf8(bytes.borrow().clone()).unwrap();
-        assert!(output.contains("  \x1b[31mcreate error\x1b[0m\n"));
+        assert!(output.contains("\x1b[31mcreate error\x1b[0m\n"));
         assert!(output.contains("\x1b[31m\x1b[1mScenario: default: error\x1b[0m\n"));
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1156,7 +1231,11 @@ scenarios:
     struct RecordingProvisioner(RefCell<Vec<String>>);
 
     impl Provisioner for RecordingProvisioner {
-        fn create(&self, scenario_path: &str) -> Result<ResourceManifest, ProvisionerError> {
+        fn create(
+            &self,
+            scenario_path: &str,
+            _: &crate::config::PhaseDefinition,
+        ) -> Result<ResourceManifest, ProvisionerError> {
             self.0.borrow_mut().push(format!("create:{scenario_path}"));
             Ok(ResourceManifest::default())
         }
@@ -1165,6 +1244,10 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &ResourceManifest,
+            _: &[std::path::PathBuf],
+            _: Option<&serde_json::Value>,
+            _: &mut dyn std::io::Write,
+            _: bool,
         ) -> Result<(), ProvisionerError> {
             self.0.borrow_mut().push(format!("destroy:{scenario_path}"));
             Ok(())

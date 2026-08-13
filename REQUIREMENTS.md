@@ -95,6 +95,9 @@ Every resource has:
 - optional relationships to other resources; and
 - optional sensitive attributes (e.g. passwords).
 
+Resource collections preserve declaration/provisioner order. An Ansible host
+listed first remains first in generated inventories and resource views.
+
 ### state and View
 
 The **state** contains resources, configuration, paths, and other
@@ -140,8 +143,9 @@ The initially supported verifier types are:
 - `exec`: execute a command and interpret its exit status.
 
 Provisioner, converger, and verifier defaults are declared at configuration
-top level. A named adapter in a phase value, and a verifier on an individual
-test, override the applicable default.
+top level. In the current stub, an omitted provisioner defaults to `dummy`. A
+named adapter in a phase value, and a verifier on an individual test, override
+the applicable default.
 
 Child scenarios are declared in an ordered `nested` list. Each entry has a
 `name` and either an inline scenario body or an `include` path. An included file
@@ -172,7 +176,8 @@ of resources from an existing pool, or create new (e.g. files, namespaces).
 A provisioner can optionally support `dependency` phase (before create):
 install or validate prerequisites, e.g. install ansible collections.
 
-Provisioner input is opaque to CVD. Output is returned to CVD, and updated with
+Provisioner input is opaque to the lifecycle core. Each provisioner adapter
+owns and validates its input schema. Output is returned to CVD and updated with
 runtime information (phase, etc).
 
 The provisioner contract must be available as a documented process protocol so
@@ -182,6 +187,42 @@ wire format and protocol versioning are deferred design decisions.
 Input parameters for provisioner are set by CVD configuration for scenario,
 and are saved into state. Provisioner reads state, creates required resources
 and update state with information about created instances of resources.
+
+### Initial Ansible provisioner
+
+An Ansible `create` action has an `ansible` options mapping alongside inline
+Ansible inventory data:
+
+```yaml
+create:
+  ansible:
+    playbook: create.yaml
+    group: resources.hosts
+  resources:
+    hosts:
+      vm1:
+        flavor: SSD.30
+```
+
+`playbook` is resolved when configuration is loaded. A dotted `group` value
+selects an inventory host mapping; a simple group name exposes the conventional
+`resources.hosts` mapping under that group. The selected hosts become CVD
+resources. CVD writes the generated inventory, passes it to create and later
+Ansible phases through `ANSIBLE_INVENTORY`, runs playbooks from the root
+configuration directory, and preserves each selected host's variables as
+initial resource attributes. For later phases, returned resource attributes are
+overlaid onto the host variables; when `ansible_host` is not explicitly set,
+`public_ip` supplies it.
+
+Successful `ansible.builtin.set_fact` tasks are the return channel. CVD collects
+their facts per inventory host and merges them into that resource's attributes;
+returned facts override initial attributes with the same name. Facts returned
+for a host outside the selected resource mapping are an error. Failure to start
+Ansible, a non-zero exit, or missing or malformed returned data is a phase
+`error`.
+
+This is the built-in Ansible adapter contract. The general process protocol for
+third-party provisioners remains deferred.
 
 ## Ansible integration
 
@@ -202,10 +243,11 @@ For collection tests, CVD must be able to install or link the collection into
 an isolated Ansible collection path without requiring global installation.
 Temporary isolation must not modify the source project.
 
-### Initial Ansible converger
+### Initial Ansible converger and destroy
 
 The initial Ansible converger handles `prepare`, `converge`, `idempotence`, and
-`cleanup`. Its parameters identify playbooks:
+`cleanup`. The Ansible provisioner also handles an optional `destroy` playbook
+using the same resource inventory. Parameters identify playbooks:
 
 - null selects `<phase>.yaml` or `<phase>.yml` beside the scenario file;
 - a string selects one playbook; and
@@ -217,7 +259,8 @@ configuration, before a run and its state are created. Paths in included
 scenario fragments are relative to the included file. CVD passes the resolved
 playbook path to `ansible-playbook` and sets its working directory to the
 directory containing the root `cvd.yml`. Failure to start the process or a
-non-zero exit is a phase `error`.
+non-zero exit is a phase `error`. A missing default `destroy.yaml`/`destroy.yml`
+means no Ansible destroy action; explicitly named destroy playbooks must exist.
 
 ## Execution and selection
 
@@ -314,6 +357,7 @@ CVD persists enough state to support inspection, cleanup, and reruns:
 Sensitive values are redacted from logs and reports.
 
 Interactive run output groups phases under a single scenario entrance header.
+All scenario, phase, command, and verdict lines are emitted without indentation.
 Entrance and verdict lines begin with `Scenario: `; for example,
 `Scenario: default/restart` and `Scenario: default/restart: passed`. The full
 entrance and verdict lines are bold, and each scenario ends with a `passed`,
@@ -351,3 +395,8 @@ These choices require focused design work before implementation:
 - exact safe-phase and rerun rules after interrupted executions;
 - plugin discovery and distribution; and
 - aggregation rules for nested scenario results.
+
+
+## Ansible
+
+Host order in resources should be preserved in the generated inventory.

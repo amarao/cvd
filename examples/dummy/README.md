@@ -22,7 +22,7 @@ From the repository root, run every root scenario:
 cargo run -- run --file examples/dummy/cvd.yml
 ```
 
-Run output groups indented phases under a bold `Scenario: <path>` entrance and
+Run output groups flush-left phases after a bold `Scenario: <path>` entrance and
 closes each scenario with a bold `Scenario: <path>: <verdict>` line. On an
 interactive terminal, passed lines are green, errors are red, and skipped lines
 are gray. Redirected output and output produced with `NO_COLOR` set are plain

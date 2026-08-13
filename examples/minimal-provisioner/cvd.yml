@@ -1,0 +1,21 @@
+version: 1
+
+converger: ansible
+verifier: dummy
+
+scenarios:
+  provisioned-resource:
+    create:
+      ansible:
+        playbook: create.yaml
+        group: mygroup2
+      resources:
+        hosts:
+          vm1:
+            flavor: SSD.30
+          vm2:
+            flavor: SSD.40
+    prepare:
+    converge:
+    verify:
+    destroy:

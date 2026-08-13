@@ -65,8 +65,8 @@ fn nested_selector_runs_ancestor_chain_and_selected_subtree() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("summary: run run-"));
     assert!(!stdout.contains("\x1b["));
-    assert!(stdout.contains("  Scenario: default/restart\n"));
-    assert!(stdout.contains("  Scenario: default/restart: passed\n"));
+    assert!(stdout.contains("Scenario: default/restart\n"));
+    assert!(stdout.contains("Scenario: default/restart: passed\n"));
     let state = load_state(
         &state_directory
             .join("runs")
@@ -329,8 +329,8 @@ fn state_report_replays_last_and_explicit_runs_without_reading_configuration() {
     let latest = String::from_utf8(latest.stdout).unwrap();
     assert!(!latest.contains("\x1b["));
     assert!(latest.contains("Scenario: independent\n"));
-    assert!(latest.contains("  dependency skipped\n"));
-    assert!(latest.contains("  create pass\n"));
+    assert!(latest.contains("dependency skipped\n"));
+    assert!(latest.contains("create pass\n"));
     assert!(latest.contains("Scenario: independent: passed\n"));
     assert!(latest.ends_with(&format!(
         "summary: run {independent_run_id}, 0 error(s), 0 verifier failure(s)\n"
@@ -348,10 +348,10 @@ fn state_report_replays_last_and_explicit_runs_without_reading_configuration() {
     assert!(explicit.status.success());
     let explicit = String::from_utf8(explicit.stdout).unwrap();
     assert!(explicit.contains("Scenario: default\n"));
-    assert!(explicit.contains("  Scenario: default/restart\n"));
-    assert!(explicit.contains("    Scenario: default/restart/deep\n"));
-    assert!(explicit.contains("    create pass\n"));
-    assert!(explicit.contains("  Scenario: default/restart: passed\n"));
+    assert!(explicit.contains("Scenario: default/restart\n"));
+    assert!(explicit.contains("Scenario: default/restart/deep\n"));
+    assert!(explicit.contains("create pass\n"));
+    assert!(explicit.contains("Scenario: default/restart: passed\n"));
     assert!(explicit.ends_with(&format!(
         "summary: run {nested_run_id}, 0 error(s), 0 verifier failure(s)\n"
     )));
@@ -467,12 +467,7 @@ scenarios:
         "second.yml",
         "cleanup-custom.yml",
     ]
-    .map(|playbook| {
-        format!(
-            "  ansible-playbook {}\n",
-            directory.join(playbook).display()
-        )
-    });
+    .map(|playbook| format!("ansible-playbook {}\n", directory.join(playbook).display()));
     let mut previous = 0;
     for line in &expected {
         let position = output
@@ -534,6 +529,158 @@ scenarios:
             .as_str()
             .unwrap()
             .contains("exited with exit status: 7")
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn ansible_provisioner_passes_inventory_and_collects_resource_facts() {
+    let directory = test_directory("ansible-provisioner");
+    fs::create_dir_all(&directory).unwrap();
+    let binary_directory = directory.join("bin");
+    fs::create_dir_all(&binary_directory).unwrap();
+    let ansible_playbook = binary_directory.join("ansible-playbook");
+    fs::write(
+        &ansible_playbook,
+        r#"#!/bin/sh
+if [ "$1" = "-i" ]; then
+  cp "$2" "$CVD_CAPTURED_INVENTORY"
+  returned_facts=${CVD_RETURNED_FACTS:-'{"vm1":{"public_ip":"127.0.0.1"},"vm2":{"public_ip":"127.0.0.1"}}'}
+  printf '%s\n' "$returned_facts" > "$CVD_RESOURCE_FACTS_FILE"
+else
+  cp "$ANSIBLE_INVENTORY" "$CVD_CONVERGE_INVENTORY"
+fi
+exit 0
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&ansible_playbook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&ansible_playbook, permissions).unwrap();
+
+    let mut search_path = vec![binary_directory];
+    search_path.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+    let search_path = env::join_paths(search_path).unwrap();
+    let state_directory = directory.join("state");
+    let captured_inventory = directory.join("inventory.json");
+    let converge_inventory = directory.join("converge-inventory.json");
+    let configuration = fs::canonicalize("examples/minimal-provisioner/cvd.yml").unwrap();
+    let arguments = [
+        "run",
+        "provisioned-resource",
+        "--file",
+        configuration.to_str().unwrap(),
+        "--state-dir",
+        state_directory.to_str().unwrap(),
+    ];
+    let output = command(&arguments)
+        .env("PATH", &search_path)
+        .env("CVD_CAPTURED_INVENTORY", &captured_inventory)
+        .env("CVD_CONVERGE_INVENTORY", &converge_inventory)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let inventory = load_state(&captured_inventory);
+    assert_eq!(
+        inventory["mygroup2"]["hosts"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["vm1", "vm2"]
+    );
+    assert_eq!(inventory["mygroup2"]["hosts"]["vm1"]["flavor"], "SSD.30");
+    assert_eq!(inventory["mygroup2"]["hosts"]["vm2"]["flavor"], "SSD.40");
+    let converge_inventory_json = load_state(&converge_inventory);
+    assert_eq!(
+        converge_inventory_json["mygroup2"]["hosts"]["vm1"]["public_ip"],
+        "127.0.0.1"
+    );
+    assert_eq!(
+        converge_inventory_json["mygroup2"]["hosts"]["vm1"]["ansible_host"],
+        "127.0.0.1"
+    );
+    assert_eq!(
+        converge_inventory_json["mygroup2"]["hosts"]["vm2"]["public_ip"],
+        "127.0.0.1"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let inventory_line = stdout.find("ANSIBLE_INVENTORY=").unwrap();
+    let command_line = stdout.find("ansible-playbook").unwrap();
+    assert!(inventory_line < command_line);
+
+    let state = load_state(
+        &state_directory
+            .join("runs")
+            .join(last_run_id(&state_directory))
+            .join("state.json"),
+    );
+    let resources = state["scenarios"]["provisioned-resource"]["resources"]["resources"]
+        .as_array()
+        .unwrap();
+    assert_eq!(resources.len(), 2);
+    assert_eq!(
+        resources
+            .iter()
+            .map(|resource| resource["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["vm1", "vm2"]
+    );
+    for (resource, (id, flavor)) in resources.iter().zip([("vm1", "SSD.30"), ("vm2", "SSD.40")]) {
+        assert_eq!(resource["id"], id);
+        assert_eq!(resource["type"], "mygroup2");
+        assert_eq!(resource["attributes"]["flavor"], flavor);
+        assert_eq!(resource["attributes"]["public_ip"], "127.0.0.1");
+        assert_eq!(resource["created"]["scenario_path"], "provisioned-resource");
+        assert_eq!(resource["created"]["phase"], "create");
+        assert_eq!(
+            resource["destroyed"]["scenario_path"],
+            "provisioned-resource"
+        );
+        assert_eq!(resource["destroyed"]["phase"], "destroy");
+        assert_eq!(resource["exists"], false);
+    }
+
+    let invalid_state_directory = directory.join("invalid-state");
+    let invalid_arguments = [
+        "run",
+        "provisioned-resource",
+        "--file",
+        configuration.to_str().unwrap(),
+        "--state-dir",
+        invalid_state_directory.to_str().unwrap(),
+    ];
+    let invalid = command(&invalid_arguments)
+        .env("PATH", &search_path)
+        .env("CVD_CAPTURED_INVENTORY", &captured_inventory)
+        .env("CVD_CONVERGE_INVENTORY", &converge_inventory)
+        .env(
+            "CVD_RETURNED_FACTS",
+            r#"{"unknown":{"public_ip":"192.0.2.1"}}"#,
+        )
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    let invalid_state = load_state(
+        &invalid_state_directory
+            .join("runs")
+            .join(last_run_id(&invalid_state_directory))
+            .join("state.json"),
+    );
+    assert_eq!(
+        invalid_state["scenarios"]["provisioned-resource"]["phases"]["create"]["status"],
+        "error"
+    );
+    assert!(
+        invalid_state["primary_error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown resource `unknown`")
     );
     fs::remove_dir_all(directory).unwrap();
 }

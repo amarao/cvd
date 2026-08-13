@@ -23,7 +23,7 @@ scenarios:
           terraform: tf/vms
         destroy:
         prepare:
-          - ansible: prepare.yaml
+          - prepare.yaml
         converge:
         verify:
         cleanup:

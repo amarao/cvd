@@ -7,7 +7,7 @@ Build the smallest usable CVD executable that can:
 - load a scenario file;
 - parse recursively nested scenarios;
 - select and run a scenario tree;
-- invoke `dummy` provisioner, converger, and verifier adapters; and
+- invoke dummy adapters plus the initial Ansible provisioner and converger; and
 - persist lifecycle progress in run-specific state files.
 
 The stub validates the lifecycle model. It runs configured Ansible playbooks
@@ -50,7 +50,8 @@ Rules:
 - Scenario names are unique among siblings and form stable slash-separated
   paths such as `default/restart`.
 - Top-level `provisioner`, `converger`, and `verifier` values are defaults.
-  Phase adapter mappings and test verifier fields can override them.
+  The stub defaults an omitted provisioner to `dummy`. Phase adapter mappings
+  and test verifier fields can override defaults.
 - A phase is enabled by the presence of its key. Its value may be null, a
   scalar, an adapter mapping, or an ordered list of adapter mappings. Omitted
   phases are recorded as `skipped`. An adapter mapping has exactly one adapter
@@ -59,8 +60,8 @@ Rules:
   body or an `include` path to a scenario fragment relative to the containing
   file.
 - `terraform`, `pytest`, and `exec` action names remain dummy no-ops. The
-  Ansible converger resolves and runs playbooks as described below. The verifier
-  returns `pass`.
+  Ansible provisioner and converger run playbooks as described below. The
+  verifier returns `pass`.
 - A scenario can omit tests and children.
 - Unknown fields are rejected so configuration mistakes are visible.
 - Unknown implementation names are rejected. The recognized structural names
@@ -101,10 +102,11 @@ Behavior:
 - Configuration, selector, duplicate-name, state I/O, and unsupported-provider
   errors produce a non-zero exit status with a concise message.
 
-Print one bold `Scenario: <path>` entrance header per scenario, indent its phase
-results, and end it with a bold `Scenario: <path>: <verdict>` line whose verdict
-is `passed`, `error`, or `skipped`. End the run with a summary and return zero
-only when it has no `error` or verifier `fail`. Disable terminal styling for
+Print one bold `Scenario: <path>` entrance header per scenario, emit its phase
+results without indentation, and end it with a bold
+`Scenario: <path>: <verdict>` line whose verdict is `passed`, `error`, or
+`skipped`. End the run with a summary and return zero only when it has no
+`error` or verifier `fail`. Disable terminal styling for
 redirected output or when `NO_COLOR` is set. In styled output, render passed
 phase and verdict lines in green, errors in red, and skipped lines in gray.
 `state-report` uses the same formatting and styling, including any persisted
@@ -129,6 +131,13 @@ The dummy provisioner:
 - creates one resource named `dummy`, of type `dummy`, with `ipv6: "::1"`; and
 - marks that resource destroyed during `destroy`.
 
+The initial Ansible provisioner accepts an `ansible` mapping plus inline
+inventory in `create`. It passes the inventory to the configured playbook,
+selects resource hosts by a dotted group path, and merges facts returned by
+successful `set_fact` tasks into resource attributes. Its `destroy` action is a
+no-op when no destroy playbook is configured; otherwise it runs the resolved
+destroy playbook with the resource inventory.
+
 The dummy verifier:
 
 - accepts no configuration;
@@ -142,7 +151,9 @@ string, or a list of playbook strings. Null selects the single existing
 Explicit playbooks must also exist when configuration is loaded. Included
 scenario paths are relative to the included fragment. Execution passes the
 resolved path to `ansible-playbook` with its working directory set to the root
-configuration directory. A launch failure or non-zero exit is a phase `error`.
+configuration directory. When an Ansible create inventory exists, CVD writes
+it to a temporary JSON file and passes its path through `ANSIBLE_INVENTORY` to
+later Ansible phases. A launch failure or non-zero exit is a phase `error`.
 
 On an execution error, retain the primary error, attempt applicable destruction
 unless `--keep` is active, persist the final state, and exit non-zero.
@@ -159,7 +170,7 @@ src/
   config.rs        YAML schema, validation, scenario lookup
   converger.rs     converger trait and DummyConverger
   lifecycle.rs     recursive execution and ordering
-  provisioner.rs   provisioner trait and DummyProvisioner
+  provisioner.rs   provisioner trait, dummy and Ansible implementations
   verifier.rs      verifier trait and DummyVerifier
   state.rs         persisted model and atomic storage
 ```

@@ -24,7 +24,7 @@ use crate::{
     config::Config,
     converger::AnsibleConverger,
     lifecycle::{LifecycleError, LifecycleRunner, render_state_report},
-    provisioner::DummyProvisioner,
+    provisioner::AnsibleProvisioner,
     state::{RunState, StateError, StateRepository, StateRepositoryError, default_state_directory},
     verifier::DummyVerifier,
 };
@@ -111,12 +111,11 @@ fn run(args: RunArgs) -> Result<(), AppError> {
     // Publishing `last-run` happens only after this initial state is durable,
     // making an interrupted newest run inspectable without overwriting history.
     let store = repository.start_run(&state)?;
-    let provisioner = DummyProvisioner;
-    let converger = AnsibleConverger::new(
-        configuration_path
-            .parent()
-            .expect("a canonical configuration path has a parent"),
-    );
+    let working_directory = configuration_path
+        .parent()
+        .expect("a canonical configuration path has a parent");
+    let provisioner = AnsibleProvisioner::new(working_directory);
+    let converger = AnsibleConverger::new(working_directory);
     let verifier = DummyVerifier;
     let output = io::stdout();
     let styled_output =
