@@ -12,8 +12,8 @@ use crate::{
     converger::Converger,
     provisioner::Provisioner,
     state::{
-        ErrorRecord, LifecyclePhase, PhaseStatus, RunState, StateError, StateStore, TestResult,
-        VerifierStatus,
+        ErrorRecord, LifecyclePhase, PhaseStatus, RunState, ScenarioState, StateError, StateStore,
+        TestResult, VerifierStatus,
     },
     verifier::Verifier,
 };
@@ -428,8 +428,15 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         self.state
             .complete_phase(path, phase.clone(), status.clone());
         self.store.save(&self.state)?;
-        write_phase_result(&mut self.output, path, &phase, &status, self.styled_output)
-            .map_err(Into::into)
+        write_phase_result(
+            &mut self.output,
+            path,
+            &phase,
+            &status,
+            self.state.scenarios.get(path),
+            self.styled_output,
+        )
+        .map_err(Into::into)
     }
 
     fn write_scenario_entrance(&mut self, path: &str) -> Result<(), LifecycleError> {
@@ -496,7 +503,14 @@ fn render_persisted_scenario<W: Write>(
         LifecyclePhase::Verify,
     ] {
         if let Some(phase_state) = scenario.phases.get(&phase) {
-            write_phase_result(output, path, &phase, &phase_state.status, styled_output)?;
+            write_phase_result(
+                output,
+                path,
+                &phase,
+                &phase_state.status,
+                Some(scenario),
+                styled_output,
+            )?;
         }
     }
     for child_path in report_child_paths(state, path) {
@@ -504,7 +518,14 @@ fn render_persisted_scenario<W: Write>(
     }
     for phase in [LifecyclePhase::Cleanup, LifecyclePhase::Destroy] {
         if let Some(phase_state) = scenario.phases.get(&phase) {
-            write_phase_result(output, path, &phase, &phase_state.status, styled_output)?;
+            write_phase_result(
+                output,
+                path,
+                &phase,
+                &phase_state.status,
+                Some(scenario),
+                styled_output,
+            )?;
         }
     }
     write_scenario_verdict(
@@ -558,15 +579,47 @@ fn write_phase_result<W: Write>(
     _path: &str,
     phase: &LifecyclePhase,
     status: &PhaseStatus,
+    scenario: Option<&ScenarioState>,
     styled_output: bool,
 ) -> std::io::Result<()> {
     let phase = phase_name(phase);
-    let status = status_name(status);
+    let color_status = status_name(status);
+    let status = phase_status_text(phase, status, scenario);
     if styled_output {
-        writeln!(output, "{}{phase} {status}\x1b[0m", result_color(status))
+        writeln!(
+            output,
+            "{}{phase} {status}\x1b[0m",
+            result_color(color_status)
+        )
     } else {
         writeln!(output, "{phase} {status}")
     }
+}
+
+fn phase_status_text(
+    phase: &str,
+    status: &PhaseStatus,
+    scenario: Option<&ScenarioState>,
+) -> String {
+    if *status == PhaseStatus::Pass {
+        let resources = scenario.map(|scenario| &scenario.resources.resources);
+        match phase {
+            "create" => return format!("{} added", resources.map_or(0, Vec::len)),
+            "destroy" => {
+                let count = resources
+                    .map(|resources| {
+                        resources
+                            .iter()
+                            .filter(|resource| resource.destroyed.is_some())
+                            .count()
+                    })
+                    .unwrap_or(0);
+                return format!("{count} deleted");
+            }
+            _ => {}
+        }
+    }
+    status_name(status).to_owned()
 }
 
 fn write_scenario_entrance<W: Write>(
@@ -886,7 +939,7 @@ scenarios:
         assert!(output.contains("Scenario: default: passed"));
         assert!(output.contains("create running\n"));
         assert!(output.contains("converge running\n"));
-        let create = output.find("create pass").unwrap();
+        let create = output.find("create 1 added").unwrap();
         let prepare = output.find("prepare pass").unwrap();
         assert!(create < prepare);
         std::fs::remove_dir_all(directory).unwrap();
@@ -970,7 +1023,7 @@ scenarios:
         .unwrap();
 
         let output = String::from_utf8(bytes.borrow().clone()).unwrap();
-        assert!(output.contains("\x1b[32mcreate pass\x1b[0m\n"));
+        assert!(output.contains("\x1b[32mcreate 1 added\x1b[0m\n"));
         assert!(output.contains("\x1b[32m\x1b[1mScenario: independent: passed\x1b[0m\n"));
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -998,9 +1051,9 @@ scenarios:
         assert!(report.contains("Scenario: default\n"));
         assert!(report.contains("dependency skipped\n"));
         assert!(report.contains("Scenario: default/restart\n"));
-        assert!(report.contains("create pass\n"));
+        assert!(report.contains("create 1 added\n"));
         assert!(report.contains("Scenario: default/restart/deep\n"));
-        assert!(report.contains("destroy pass\n"));
+        assert!(report.contains("destroy 1 deleted\n"));
         assert!(report.contains("Scenario: default/restart/deep: passed\n"));
         assert!(report.contains("Scenario: default/restart: passed\n"));
         assert!(report.contains("Scenario: default: passed\n"));
@@ -1008,7 +1061,7 @@ scenarios:
         let child_entrance = report.find("Scenario: default/restart\n").unwrap();
         let child_verdict = report.find("Scenario: default/restart: passed\n").unwrap();
         let parent_cleanup = report.rfind("cleanup pass\n").unwrap();
-        let parent_destroy = report.rfind("destroy pass\n").unwrap();
+        let parent_destroy = report.rfind("destroy 1 deleted\n").unwrap();
         let parent_verdict = report.rfind("Scenario: default: passed\n").unwrap();
         assert!(parent_verify < child_entrance);
         assert!(child_entrance < child_verdict);
@@ -1032,7 +1085,7 @@ scenarios:
         let report = String::from_utf8(report).unwrap();
         assert!(report.contains("\x1b[1mScenario: empty\x1b[0m\n"));
         assert!(report.contains("\x1b[90mdependency skipped\x1b[0m\n"));
-        assert!(report.contains("\x1b[32mcreate pass\x1b[0m\n"));
+        assert!(report.contains("\x1b[32mcreate 0 added\x1b[0m\n"));
         assert!(report.contains("converge running\x1b[0m\n"));
         assert!(report.contains("\x1b[31m\x1b[1mScenario: empty: error\x1b[0m\n"));
     }

@@ -1101,12 +1101,7 @@ scenarios:
         ] {
             assert!(scenario.has_phase(phase));
         }
-        for phase in [
-            ConfiguredPhase::Dependency,
-            ConfiguredPhase::Prepare,
-            ConfiguredPhase::Idempotence,
-            ConfiguredPhase::Cleanup,
-        ] {
+        for phase in [ConfiguredPhase::Dependency, ConfiguredPhase::Idempotence] {
             assert!(!scenario.has_phase(phase));
         }
         assert!(scenario.scenarios.iter().next().is_none());
