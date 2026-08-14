@@ -111,8 +111,9 @@ redirected output or when `NO_COLOR` is set. In styled output, render passed
 phase and verdict lines in green, errors in red, and skipped lines in gray.
 `state-report` uses the same formatting and styling, including any persisted
 `pending` or `running` phase states.
-Successful create and destroy lines report `N added` and `N deleted` resource
+Successful create and destroy lines report `N resource added` and `N resource deleted`
 counts instead of the generic `pass` text.
+Run summaries include total created and destroyed resource counts.
 
 ## Stub lifecycle
 

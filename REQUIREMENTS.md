@@ -359,8 +359,12 @@ Sensitive values are redacted from logs and reports.
 Interactive run output groups phases under a single scenario entrance header.
 All scenario, phase, command, and verdict lines are emitted without indentation.
 Successful `create` and `destroy` phases report resource changes as
-`create N added` and `destroy N deleted`; their styling uses the normal passed
+`create: N resource added` and `destroy: N resource deleted`; their styling uses the normal passed
 (green) color. `state-report` reproduces the same count-bearing lines.
+Every phase start and result line is prefixed with its full
+`scenario/subscenario::phase` path.
+Run summaries report total created and destroyed resource counts alongside
+errors and verifier failures.
 Entrance and verdict lines begin with `Scenario: `; for example,
 `Scenario: default/restart` and `Scenario: default/restart: passed`. The full
 entrance and verdict lines are bold, and each scenario ends with a `passed`,

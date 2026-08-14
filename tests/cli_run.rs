@@ -329,11 +329,11 @@ fn state_report_replays_last_and_explicit_runs_without_reading_configuration() {
     let latest = String::from_utf8(latest.stdout).unwrap();
     assert!(!latest.contains("\x1b["));
     assert!(latest.contains("Scenario: independent\n"));
-    assert!(latest.contains("dependency skipped\n"));
-    assert!(latest.contains("create 1 added\n"));
+    assert!(latest.contains("independent::dependency skipped\n"));
+    assert!(latest.contains("independent::create: 1 resource added\n"));
     assert!(latest.contains("Scenario: independent: passed\n"));
     assert!(latest.ends_with(&format!(
-        "summary: run {independent_run_id}, 0 error(s), 0 verifier failure(s)\n"
+        "summary: run {independent_run_id}, created 1 resource(s), destroyed 1 resource(s), 0 error(s), 0 verifier failure(s)\n"
     )));
 
     let explicit = run(&[
@@ -350,10 +350,10 @@ fn state_report_replays_last_and_explicit_runs_without_reading_configuration() {
     assert!(explicit.contains("Scenario: default\n"));
     assert!(explicit.contains("Scenario: default/restart\n"));
     assert!(explicit.contains("Scenario: default/restart/deep\n"));
-    assert!(explicit.contains("create 1 added\n"));
+    assert!(explicit.contains("default/restart::create: 1 resource added\n"));
     assert!(explicit.contains("Scenario: default/restart: passed\n"));
     assert!(explicit.ends_with(&format!(
-        "summary: run {nested_run_id}, 0 error(s), 0 verifier failure(s)\n"
+        "summary: run {nested_run_id}, created 3 resource(s), destroyed 3 resource(s), 0 error(s), 0 verifier failure(s)\n"
     )));
 
     fs::remove_dir_all(directory).expect("remove only test directory");

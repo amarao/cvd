@@ -114,7 +114,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             self.outcome.execution_errors += 1;
         }
         self.store.save(&self.state)?;
-        write_summary(&mut self.output, &self.state.run_id, &self.outcome)?;
+        write_summary(&mut self.output, &self.state, &self.outcome)?;
         Ok((self.outcome, self.state))
     }
 
@@ -155,7 +155,10 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             {
                 return true;
             }
-            if self.write_phase_running(&LifecyclePhase::Create).is_err() {
+            if self
+                .write_phase_running(path, &LifecyclePhase::Create)
+                .is_err()
+            {
                 return true;
             }
             let definition = scenario
@@ -240,7 +243,10 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         {
             return true;
         }
-        if self.write_phase_running(&LifecyclePhase::Verify).is_err() {
+        if self
+            .write_phase_running(path, &LifecyclePhase::Verify)
+            .is_err()
+        {
             return true;
         }
 
@@ -301,7 +307,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             .is_err();
         // The provider is still called when either reporting step fails; this
         // preserves best-effort destruction.
-        let _ = self.write_phase_running(&LifecyclePhase::Destroy);
+        let _ = self.write_phase_running(path, &LifecyclePhase::Destroy);
         let definition = scenario
             .phase(ConfiguredPhase::Destroy)
             .expect("destroy phase presence was checked");
@@ -355,7 +361,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         if self.persist_or_record(path, phase.clone()).is_err() {
             return true;
         }
-        if self.write_phase_running(&phase).is_err() {
+        if self.write_phase_running(path, &phase).is_err() {
             return true;
         }
         let definition = scenario
@@ -443,8 +449,12 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         write_scenario_entrance(&mut self.output, path, self.styled_output).map_err(Into::into)
     }
 
-    fn write_phase_running(&mut self, phase: &LifecyclePhase) -> Result<(), LifecycleError> {
-        writeln!(&mut self.output, "{} running", phase_name(phase)).map_err(Into::into)
+    fn write_phase_running(
+        &mut self,
+        path: &str,
+        phase: &LifecyclePhase,
+    ) -> Result<(), LifecycleError> {
+        writeln!(&mut self.output, "{}::{} running", path, phase_name(phase)).map_err(Into::into)
     }
 
     fn write_scenario_verdict(
@@ -483,7 +493,7 @@ pub fn render_state_report<W: Write>(
     for path in report_root_paths(state) {
         render_persisted_scenario(state, path, &mut output, styled_output)?;
     }
-    write_summary(&mut output, &state.run_id, &persisted_outcome(state))
+    write_summary(&mut output, state, &persisted_outcome(state))
 }
 
 fn render_persisted_scenario<W: Write>(
@@ -564,35 +574,57 @@ fn report_child_paths<'a>(state: &'a RunState, parent_path: &str) -> Vec<&'a str
 
 fn write_summary<W: Write>(
     output: &mut W,
-    run_id: &str,
+    state: &RunState,
     outcome: &RunOutcome,
 ) -> std::io::Result<()> {
+    let (created, destroyed) = resource_counts(state);
     writeln!(
         output,
-        "summary: run {run_id}, {} error(s), {} verifier failure(s)",
-        outcome.execution_errors, outcome.verifier_failures
+        "summary: run {}, created {} resource(s), destroyed {} resource(s), {} error(s), {} verifier failure(s)",
+        state.run_id, created, destroyed, outcome.execution_errors, outcome.verifier_failures
     )
+}
+
+fn resource_counts(state: &RunState) -> (usize, usize) {
+    let resources = state
+        .scenarios
+        .values()
+        .flat_map(|scenario| scenario.resources.resources.iter());
+    let mut created = 0;
+    let mut destroyed = 0;
+    for resource in resources {
+        created += 1;
+        if resource.destroyed.is_some() {
+            destroyed += 1;
+        }
+    }
+    (created, destroyed)
 }
 
 fn write_phase_result<W: Write>(
     output: &mut W,
-    _path: &str,
+    path: &str,
     phase: &LifecyclePhase,
     status: &PhaseStatus,
     scenario: Option<&ScenarioState>,
     styled_output: bool,
 ) -> std::io::Result<()> {
-    let phase = phase_name(phase);
+    let phase_name = phase_name(phase);
     let color_status = status_name(status);
-    let status = phase_status_text(phase, status, scenario);
+    let status_text = phase_status_text(phase_name, status, scenario);
+    let separator = if matches!(phase_name, "create" | "destroy") && *status == PhaseStatus::Pass {
+        ": "
+    } else {
+        " "
+    };
     if styled_output {
         writeln!(
             output,
-            "{}{phase} {status}\x1b[0m",
+            "{}{path}::{phase_name}{separator}{status_text}\x1b[0m",
             result_color(color_status)
         )
     } else {
-        writeln!(output, "{phase} {status}")
+        writeln!(output, "{path}::{phase_name}{separator}{status_text}")
     }
 }
 
@@ -604,7 +636,7 @@ fn phase_status_text(
     if *status == PhaseStatus::Pass {
         let resources = scenario.map(|scenario| &scenario.resources.resources);
         match phase {
-            "create" => return format!("{} added", resources.map_or(0, Vec::len)),
+            "create" => return format!("{} resource added", resources.map_or(0, Vec::len)),
             "destroy" => {
                 let count = resources
                     .map(|resources| {
@@ -614,7 +646,7 @@ fn phase_status_text(
                             .count()
                     })
                     .unwrap_or(0);
-                return format!("{count} deleted");
+                return format!("{count} resource deleted");
             }
             _ => {}
         }
@@ -937,10 +969,10 @@ scenarios:
         assert!(!output.contains("\x1b["));
         assert!(output.contains("Scenario: default\n"));
         assert!(output.contains("Scenario: default: passed"));
-        assert!(output.contains("create running\n"));
-        assert!(output.contains("converge running\n"));
-        let create = output.find("create 1 added").unwrap();
-        let prepare = output.find("prepare pass").unwrap();
+        assert!(output.contains("default::create running\n"));
+        assert!(output.contains("default::converge running\n"));
+        let create = output.find("default::create: 1 resource added").unwrap();
+        let prepare = output.find("default::prepare pass").unwrap();
         assert!(create < prepare);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -963,8 +995,8 @@ scenarios:
         .run(Some("default"))
         .unwrap();
         let output = String::from_utf8(bytes.borrow().clone()).unwrap();
-        assert!(output.contains("create running\n"));
-        assert!(!output.contains("\x1b[32mcreate running"));
+        assert!(output.contains("default::converge running\n"));
+        assert!(!output.contains("\x1b[32mdefault::converge running"));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -999,7 +1031,7 @@ scenarios:
 
         let output = String::from_utf8(bytes.borrow().clone()).unwrap();
         assert_eq!(output.matches("\x1b[1mScenario: empty\x1b[0m").count(), 1);
-        assert!(output.contains("\x1b[90mdependency skipped\x1b[0m\n"));
+        assert!(output.contains("\x1b[90mempty::dependency skipped\x1b[0m\n"));
         assert!(output.contains("\x1b[90m\x1b[1mScenario: empty: skipped\x1b[0m\n"));
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1023,7 +1055,7 @@ scenarios:
         .unwrap();
 
         let output = String::from_utf8(bytes.borrow().clone()).unwrap();
-        assert!(output.contains("\x1b[32mcreate 1 added\x1b[0m\n"));
+        assert!(output.contains("\x1b[32mindependent::create: 1 resource added\x1b[0m\n"));
         assert!(output.contains("\x1b[32m\x1b[1mScenario: independent: passed\x1b[0m\n"));
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1049,26 +1081,30 @@ scenarios:
         let report = String::from_utf8(report).unwrap();
         assert!(!report.contains("\x1b["));
         assert!(report.contains("Scenario: default\n"));
-        assert!(report.contains("dependency skipped\n"));
+        assert!(report.contains("default::dependency skipped\n"));
         assert!(report.contains("Scenario: default/restart\n"));
-        assert!(report.contains("create 1 added\n"));
+        assert!(report.contains("default/restart::create: 1 resource added\n"));
         assert!(report.contains("Scenario: default/restart/deep\n"));
-        assert!(report.contains("destroy 1 deleted\n"));
+        assert!(report.contains("default/restart/deep::destroy: 1 resource deleted\n"));
         assert!(report.contains("Scenario: default/restart/deep: passed\n"));
         assert!(report.contains("Scenario: default/restart: passed\n"));
         assert!(report.contains("Scenario: default: passed\n"));
-        let parent_verify = report.find("verify skipped\n").unwrap();
+        let parent_verify = report.find("default::verify skipped\n").unwrap();
         let child_entrance = report.find("Scenario: default/restart\n").unwrap();
         let child_verdict = report.find("Scenario: default/restart: passed\n").unwrap();
-        let parent_cleanup = report.rfind("cleanup pass\n").unwrap();
-        let parent_destroy = report.rfind("destroy 1 deleted\n").unwrap();
+        let parent_cleanup = report.rfind("default::cleanup pass\n").unwrap();
+        let parent_destroy = report
+            .rfind("default::destroy: 1 resource deleted\n")
+            .unwrap();
         let parent_verdict = report.rfind("Scenario: default: passed\n").unwrap();
         assert!(parent_verify < child_entrance);
         assert!(child_entrance < child_verdict);
         assert!(child_verdict < parent_cleanup);
         assert!(parent_cleanup < parent_destroy);
         assert!(parent_destroy < parent_verdict);
-        assert!(report.ends_with("summary: run test-run, 0 error(s), 0 verifier failure(s)\n"));
+        assert!(report.ends_with(
+            "summary: run test-run, created 3 resource(s), destroyed 3 resource(s), 0 error(s), 0 verifier failure(s)\n"
+        ));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1084,9 +1120,9 @@ scenarios:
         render_state_report(&run_state, &mut report, true).unwrap();
         let report = String::from_utf8(report).unwrap();
         assert!(report.contains("\x1b[1mScenario: empty\x1b[0m\n"));
-        assert!(report.contains("\x1b[90mdependency skipped\x1b[0m\n"));
-        assert!(report.contains("\x1b[32mcreate 0 added\x1b[0m\n"));
-        assert!(report.contains("converge running\x1b[0m\n"));
+        assert!(report.contains("\x1b[90mempty::dependency skipped\x1b[0m\n"));
+        assert!(report.contains("\x1b[32mempty::create: 0 resource added\x1b[0m\n"));
+        assert!(report.contains("empty::converge running\x1b[0m\n"));
         assert!(report.contains("\x1b[31m\x1b[1mScenario: empty: error\x1b[0m\n"));
     }
 
@@ -1276,7 +1312,7 @@ scenarios:
             ["create:default", "destroy:default"]
         );
         let output = String::from_utf8(bytes.borrow().clone()).unwrap();
-        assert!(output.contains("\x1b[31mcreate error\x1b[0m\n"));
+        assert!(output.contains("\x1b[31mdefault::create error\x1b[0m\n"));
         assert!(output.contains("\x1b[31m\x1b[1mScenario: default: error\x1b[0m\n"));
         fs::remove_dir_all(directory).unwrap();
     }

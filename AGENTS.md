@@ -61,6 +61,8 @@ Do not add a separate side-effect lifecycle unless requirements change.
 - Favor explicit, inspectable state and stable selectors over hidden behavior.
 - Group interactive phase output under one bold entrance per scenario and emit
   a closing scenario verdict; keep redirected output free of ANSI styling.
+- Prefix every phase start and result line with its full
+  `scenario/subscenario::phase` path.
 - Treat stopping, retaining state, repeating a phase, forcing a phase
   transition, and cleaning up from the current phase as core interactive
   capabilities.
