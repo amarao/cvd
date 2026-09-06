@@ -56,6 +56,7 @@ impl Scenario {
 #[derive(Debug)]
 pub(crate) struct PhaseDefinition {
     _value: serde_yaml::Value,
+    ansible: Option<AnsiblePhaseDefinition>,
 }
 
 impl PhaseDefinition {
@@ -70,6 +71,28 @@ impl PhaseDefinition {
             .expect("dummy action options are validated")
             .status
     }
+
+    pub(crate) fn ansible(&self) -> Option<&AnsiblePhaseDefinition> {
+        self.ansible.as_ref()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct AnsiblePhaseDefinition {
+    pub(crate) playbook: PathBuf,
+    pub(crate) vars: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAnsibleOptions {
+    playbook: PathBuf,
+    #[serde(default = "empty_json_object")]
+    vars: serde_json::Value,
+}
+
+fn empty_json_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -378,15 +401,25 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
-        for (kind, implementation) in [
-            ("provisioner", self.provisioner.as_str()),
-            ("converger", self.converger.as_str()),
-            ("verifier", self.verifier.as_str()),
-        ] {
-            validate_implementation(implementation)
-                .map_err(|reason| ConfigError::InvalidDefault { kind, reason })?;
-        }
+        validate_default("provisioner", &self.provisioner, &["dummy", "ansible"])?;
+        validate_default("converger", &self.converger, &["dummy"])?;
+        validate_default("verifier", &self.verifier, &["dummy"])?;
         validate_scenarios(self, &self.scenarios, None)
+    }
+}
+
+fn validate_default(
+    kind: &'static str,
+    implementation: &str,
+    supported: &[&str],
+) -> Result<(), ConfigError> {
+    if supported.contains(&implementation) {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidDefault {
+            kind,
+            reason: format!("unsupported implementation `{implementation}`"),
+        })
     }
 }
 
@@ -439,12 +472,25 @@ fn resolve_scenario(
         let Some(value) = value.0 else {
             continue;
         };
-        validate_phase_value(&value).map_err(|reason| ConfigError::InvalidPhase {
+        validate_phase_value(&value, phase).map_err(|reason| ConfigError::InvalidPhase {
             scenario: path.to_owned(),
             phase: configured_phase_name(phase),
             reason,
         })?;
-        phases.insert(phase, PhaseDefinition { _value: value });
+        let ansible = resolve_ansible_options(&value, phase, base).map_err(|reason| {
+            ConfigError::InvalidPhase {
+                scenario: path.to_owned(),
+                phase: configured_phase_name(phase),
+                reason,
+            }
+        })?;
+        phases.insert(
+            phase,
+            PhaseDefinition {
+                _value: value,
+                ansible,
+            },
+        );
     }
 
     let mut child_scenarios = IndexMap::new();
@@ -536,31 +582,25 @@ fn validate_scenarios(
                 reason,
             })?;
             let verifier = test.verifier.as_deref().unwrap_or(&config.verifier);
-            validate_implementation(verifier).map_err(|reason| ConfigError::InvalidTest {
-                path: test_path,
-                reason,
-            })?;
+            if verifier != "dummy" {
+                return Err(ConfigError::InvalidTest {
+                    path: test_path,
+                    reason: format!("unsupported implementation `{verifier}`"),
+                });
+            }
         }
         validate_scenarios(config, &scenario.scenarios, Some(&path))?;
     }
     Ok(())
 }
 
-fn validate_implementation(implementation: &str) -> Result<(), String> {
-    if implementation == "dummy" {
-        Ok(())
-    } else {
-        Err(format!("unsupported implementation `{implementation}`"))
-    }
-}
-
-fn validate_phase_value(value: &serde_yaml::Value) -> Result<(), String> {
+fn validate_phase_value(value: &serde_yaml::Value, phase: ConfiguredPhase) -> Result<(), String> {
     match value {
         serde_yaml::Value::Null
         | serde_yaml::Value::Bool(_)
         | serde_yaml::Value::Number(_)
         | serde_yaml::Value::String(_) => Ok(()),
-        serde_yaml::Value::Mapping(mapping) => validate_action_mapping(mapping),
+        serde_yaml::Value::Mapping(mapping) => validate_action_mapping(mapping, phase),
         serde_yaml::Value::Sequence(actions) => {
             let strings = actions
                 .iter()
@@ -578,7 +618,7 @@ fn validate_phase_value(value: &serde_yaml::Value) -> Result<(), String> {
                     let serde_yaml::Value::Mapping(mapping) = action else {
                         unreachable!("all list items were checked as mappings");
                     };
-                    validate_action_mapping(mapping)?;
+                    validate_action_mapping(mapping, phase)?;
                 }
             }
             Ok(())
@@ -587,7 +627,10 @@ fn validate_phase_value(value: &serde_yaml::Value) -> Result<(), String> {
     }
 }
 
-fn validate_action_mapping(mapping: &serde_yaml::Mapping) -> Result<(), String> {
+fn validate_action_mapping(
+    mapping: &serde_yaml::Mapping,
+    phase: ConfiguredPhase,
+) -> Result<(), String> {
     if mapping.len() != 1 {
         return Err("an adapter mapping must contain exactly one adapter name".to_owned());
     }
@@ -595,11 +638,20 @@ fn validate_action_mapping(mapping: &serde_yaml::Mapping) -> Result<(), String> 
     let serde_yaml::Value::String(adapter) = adapter else {
         return Err("an adapter name must be a string".to_owned());
     };
-    validate_implementation(adapter)?;
     let options = mapping.values().next().expect("mapping length was checked");
-    let options = parse_dummy_options(options)?;
-    if options.status == DummyStatus::Fail {
-        return Err("dummy phase status must be `ok` or `error`".to_owned());
+    match adapter.as_str() {
+        "dummy" => {
+            let options = parse_dummy_options(options)?;
+            if options.status == DummyStatus::Fail {
+                return Err("dummy phase status must be `ok` or `error`".to_owned());
+            }
+        }
+        "ansible" if matches!(phase, ConfiguredPhase::Create | ConfiguredPhase::Destroy) => {
+            let _: RawAnsibleOptions = serde_yaml::from_value(options.clone())
+                .map_err(|error| format!("invalid Ansible options: {error}"))?;
+        }
+        "ansible" => return Err("Ansible is supported only for create and destroy".to_owned()),
+        _ => return Err(format!("unsupported implementation `{adapter}`")),
     }
     Ok(())
 }
@@ -609,6 +661,37 @@ fn parse_dummy_options(value: &serde_yaml::Value) -> Result<DummyOptions, String
         return Ok(DummyOptions::default());
     }
     serde_yaml::from_value(value.clone()).map_err(|error| format!("invalid dummy options: {error}"))
+}
+
+fn resolve_ansible_options(
+    value: &serde_yaml::Value,
+    phase: ConfiguredPhase,
+    base: Option<&Path>,
+) -> Result<Option<AnsiblePhaseDefinition>, String> {
+    let serde_yaml::Value::Mapping(mapping) = value else {
+        return Ok(None);
+    };
+    let key = serde_yaml::Value::String("ansible".to_owned());
+    let Some(options) = mapping.get(&key) else {
+        return Ok(None);
+    };
+    if !matches!(phase, ConfiguredPhase::Create | ConfiguredPhase::Destroy) {
+        return Err("Ansible is supported only for create and destroy".to_owned());
+    }
+    let raw: RawAnsibleOptions = serde_yaml::from_value(options.clone())
+        .map_err(|error| format!("invalid Ansible options: {error}"))?;
+    if !raw.vars.is_object() {
+        return Err("Ansible `vars` must be a mapping".to_owned());
+    }
+    let path = base.unwrap_or_else(|| Path::new(".")).join(raw.playbook);
+    let playbook = fs::canonicalize(&path)
+        .ok()
+        .filter(|path| path.is_file())
+        .ok_or_else(|| format!("playbook `{}` was not found", path.display()))?;
+    Ok(Some(AnsiblePhaseDefinition {
+        playbook,
+        vars: raw.vars,
+    }))
 }
 
 fn configured_phase_name(phase: ConfiguredPhase) -> &'static str {

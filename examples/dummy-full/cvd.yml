@@ -1,0 +1,35 @@
+version: 1
+provisioner: dummy
+converger: dummy
+verifier: dummy
+
+scenarios:
+  full-dummy-lifecycle:
+    dependency:
+      dummy:
+        status: ok
+    create:
+      dummy:
+        status: ok
+    prepare:
+      dummy:
+        status: ok
+    converge:
+      dummy:
+        status: ok
+    idempotence:
+      dummy:
+        status: ok
+    verify:
+      dummy:
+        status: ok
+    cleanup:
+      dummy:
+        status: ok
+    destroy:
+      dummy:
+        status: ok
+    tests:
+      smoke:
+        verifier: dummy
+        status: ok

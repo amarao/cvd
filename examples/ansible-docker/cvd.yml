@@ -1,0 +1,21 @@
+version: 1
+provisioner: ansible
+converger: dummy
+verifier: dummy
+
+scenarios:
+  docker-host:
+    create:
+      ansible:
+        playbook: create.yml
+        vars:
+          container_name: cvd-ansible-host
+          container_image: alpine:3.20
+    verify:
+    destroy:
+      ansible:
+        playbook: destroy.yml
+    tests:
+      resource-reported:
+        verifier: dummy
+        status: ok

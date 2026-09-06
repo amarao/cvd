@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
@@ -500,5 +501,98 @@ scenarios:
             assert_eq!(scenario["resources"]["resources"][0]["exists"], true);
         }
     }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn ansible_provisioner_imports_create_manifest_and_supplies_it_to_destroy() {
+    let directory = test_directory("ansible-provisioner");
+    let bin = directory.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let create_playbook = directory.join("create.yml");
+    let destroy_playbook = directory.join("destroy.yml");
+    fs::write(&create_playbook, "---\n").unwrap();
+    fs::write(&destroy_playbook, "---\n").unwrap();
+    let configuration = directory.join("cvd.yml");
+    fs::write(
+        &configuration,
+        r#"version: 1
+provisioner: ansible
+converger: dummy
+verifier: dummy
+scenarios:
+  host:
+    create:
+      ansible:
+        playbook: create.yml
+        vars:
+          requested_name: example
+    destroy:
+      ansible:
+        playbook: destroy.yml
+"#,
+    )
+    .unwrap();
+    let executable = bin.join("ansible-playbook");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if grep -q '"action": "create"' "$CVD_INPUT_FILE"; then
+  cp "$CVD_INPUT_FILE" "$CVD_CAPTURE_CREATE"
+  printf '{"protocol_version":1,"invocation_id":"%s","complete":true,"resources":[{"id":"container-123","type":"docker.container","attributes":{"name":"example","ansible_connection":"docker"},"relationships":[],"sensitive_attributes":[]}]}' "$CVD_INVOCATION_ID" > "$CVD_RESULT_FILE"
+else
+  cp "$CVD_INPUT_FILE" "$CVD_CAPTURE_DESTROY"
+fi
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    let create_input = directory.join("create-input.json");
+    let destroy_input = directory.join("destroy-input.json");
+    let state_directory = directory.join("state");
+    let mut paths = vec![bin];
+    paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+    let output = command(&[
+        "run",
+        "host",
+        "--file",
+        configuration.to_str().unwrap(),
+        "--state-dir",
+        state_directory.to_str().unwrap(),
+    ])
+    .env("PATH", env::join_paths(paths).unwrap())
+    .env("CVD_CAPTURE_CREATE", &create_input)
+    .env("CVD_CAPTURE_DESTROY", &destroy_input)
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let create = load_state(&create_input);
+    assert_eq!(create["cvd"]["action"], "create");
+    assert_eq!(create["cvd"]["vars"]["requested_name"], "example");
+    assert_eq!(create["cvd"]["resources"], serde_json::json!([]));
+    let destroy = load_state(&destroy_input);
+    assert_eq!(destroy["cvd"]["action"], "destroy");
+    assert_eq!(destroy["cvd"]["resources"][0]["id"], "container-123");
+    assert_eq!(destroy["cvd"]["resources"][0]["type"], "docker.container");
+    assert_eq!(destroy["cvd"]["resources"][0]["exists"], true);
+
+    let state = load_state(
+        &state_directory
+            .join("runs")
+            .join(last_run_id(&state_directory))
+            .join("state.json"),
+    );
+    let resource = &state["scenarios"]["host"]["resources"]["resources"][0];
+    assert_eq!(resource["id"], "container-123");
+    assert_eq!(resource["created"]["scenario_path"], "host");
+    assert_eq!(resource["destroyed"]["phase"], "destroy");
+    assert_eq!(resource["exists"], false);
     fs::remove_dir_all(directory).unwrap();
 }

@@ -1,0 +1,46 @@
+---
+- name: Create a Docker container and report it as a CVD host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Start the example container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name
+          - "{{ cvd.vars.container_name }}"
+          - "{{ cvd.vars.container_image }}"
+          - sleep
+          - infinity
+      register: docker_run
+      changed_when: true
+
+    - name: Publish the complete aggregate resource manifest
+      ansible.builtin.copy:
+        dest: "{{ lookup('env', 'CVD_RESULT_FILE') }}"
+        mode: "0600"
+        content: >-
+          {{
+            {
+              'protocol_version': cvd.protocol_version,
+              'invocation_id': cvd.invocation_id,
+              'complete': true,
+              'resources': [
+                {
+                  'id': docker_run.stdout,
+                  'type': 'docker.container',
+                  'attributes': {
+                    'name': cvd.vars.container_name,
+                    'image': cvd.vars.container_image,
+                    'ansible_host': cvd.vars.container_name,
+                    'ansible_connection': 'docker'
+                  },
+                  'relationships': [],
+                  'sensitive_attributes': []
+                }
+              ]
+            } | to_nice_json
+          }}

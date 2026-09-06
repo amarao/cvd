@@ -137,11 +137,11 @@ A **test** is a named verifier invocation. A scenario can define one or more
 tests under its `tests` mapping.
 
 Provisioner, converger, and verifier defaults are declared at configuration
-top level. The current stub supports only `dummy`; an omitted provisioner
-defaults to it. Phase values remain opaque adapter input but do not alter dummy
-behavior. The dummy provisioner returns one resource with ID and type `mock`,
-the dummy converger performs no action, and the dummy verifier passes every
-named test by default. Dummy phase adapter input accepts `status: ok|error`.
+top level. The current implementation supports `dummy` and `ansible`
+provisioners; an omitted provisioner defaults to `dummy`. Converger and verifier
+implementations remain dummy-only. The dummy provisioner returns one resource
+with ID and type `mock`, the dummy converger performs no action, and the dummy
+verifier passes every named test by default. Dummy phase adapter input accepts `status: ok|error`.
 Dummy tests accept `status: ok|fail|error`. These controls exercise lifecycle
 result handling without external calls. Real adapters and external command
 execution are deferred.
@@ -186,6 +186,84 @@ wire format and protocol versioning are deferred design decisions.
 Input parameters for provisioner are set by CVD configuration for scenario,
 and are saved into state. Provisioner reads state, creates required resources
 and update state with information about created instances of resources.
+
+### Ansible provisioner contract
+
+The built-in Ansible provisioner implements `create` and `destroy`. Each phase
+uses an explicit adapter mapping:
+
+```yaml
+create:
+  ansible:
+    playbook: create.yml
+    vars:
+      instance_name: example
+destroy:
+  ansible:
+    playbook: destroy.yml
+```
+
+Playbook paths are resolved relative to the file containing the scenario and
+must exist when configuration is loaded. `vars` is an optional mapping owned by
+the playbook. CVD runs the resolved playbook from the root configuration
+directory and supplies a private JSON file through `--extra-vars @FILE`. Its
+single top-level variable is `cvd`:
+
+```json
+{
+  "cvd": {
+    "protocol_version": 1,
+    "invocation_id": "unique-per-call",
+    "action": "create",
+    "scenario_path": "docker-host",
+    "vars": {"instance_name": "example"},
+    "resources": []
+  }
+}
+```
+
+For `create`, the playbook decides what to create using `cvd.vars` and its own
+project configuration. It must publish what it actually created, rather than
+echoing requested objects. It atomically writes one aggregate JSON manifest to
+the path in `CVD_RESULT_FILE`:
+
+```json
+{
+  "protocol_version": 1,
+  "invocation_id": "unique-per-call",
+  "complete": true,
+  "resources": [
+    {
+      "id": "provider-stable-id",
+      "type": "docker.container",
+      "attributes": {},
+      "relationships": [],
+      "sensitive_attributes": []
+    }
+  ]
+}
+```
+
+The manifest array is authoritative and preserves resource order. IDs and
+types must be non-empty and IDs must be unique. CVD rejects an absent,
+malformed, incomplete, stale-invocation, or unsupported-version result. CVD,
+not the playbook, adds existence, ownership, and create/destroy provenance.
+`ansible.builtin.copy` and `ansible.builtin.template` provide atomic replacement
+by default when writing locally; result tasks must target the controller and
+must not enable `unsafe_writes`.
+
+For `destroy`, CVD supplies the exact persisted resources owned by the scenario
+in `cvd.resources`; these, rather than a reconstruction from `cvd.vars`, define
+what must be destroyed. A zero Ansible exit means all applicable resources were
+destroyed, after which CVD marks them destroyed. No destroy result file is
+required. A launch failure or non-zero exit is a phase error and leaves the
+resources recorded as existing.
+
+CVD also exports `CVD_INPUT_FILE`, `CVD_RESULT_FILE`, and
+`CVD_INVOCATION_ID`. The files are created in a per-call private directory and
+removed after the call. The aggregate result is initially a final-result
+contract: resources created before it is published cannot yet be recovered
+after interruption. Incremental checkpoint semantics remain deferred.
 
 ## Execution and selection
 

@@ -1,0 +1,20 @@
+---
+- name: Destroy resources owned by the CVD scenario
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Remove each reported Docker container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - rm
+          - --force
+          - "{{ item.id }}"
+      loop: "{{ cvd.resources }}"
+      when: item.type == 'docker.container'
+      register: docker_remove
+      changed_when: docker_remove.rc == 0
+      failed_when:
+        - docker_remove.rc != 0
+        - "'No such container' not in docker_remove.stderr"
