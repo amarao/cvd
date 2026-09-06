@@ -1,12 +1,10 @@
 version: 1
-
 provisioner: dummy
-converger: ansible
+converger: dummy
 verifier: dummy
 
 scenarios:
   default:
-    dependency:
     create:
     prepare:
     converge:
@@ -16,37 +14,3 @@ scenarios:
     destroy:
     tests:
       smoke: {}
-      regression: {}
-    nested:
-      - name: install
-        create:
-          terraform: tf/vms
-        destroy:
-        prepare:
-          - prepare.yaml
-        converge:
-        verify:
-        cleanup:
-        tests:
-          after-restart: {}
-        nested:
-          - name: configuration-check
-            prepare:
-              - ansible: conf_prepare.yaml
-            converge: bad_config.yaml
-            verify:
-              - pytest: test_rejected_bad_config/
-            cleanup:
-              - exec: rm bad_config
-            tests:
-              nested-smoke: {}
-          - name: Upgrade scenario
-            include: upgrade/cvd.yaml
-  independent:
-    create:
-    prepare:
-    converge:
-    verify:
-    destroy:
-    tests:
-      standalone-smoke: {}

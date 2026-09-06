@@ -1,7 +1,0 @@
----
-- hosts: mygroup2
-  gather_facts: false
-  tasks:
-    - name: Report the host being destroyed
-      ansible.builtin.debug:
-        msg: destroying {{ inventory_hostname }}

@@ -59,7 +59,7 @@ Internal execution status is `pending` or `running`. A completed phase result is
 
 ## Write and recovery rules
 
-- Write state before starting an external phase with status `running`.
+- Write state before starting a phase with status `running`.
 - Write again immediately after the phase result is known.
 - Write a temporary file in the state directory, flush it, and atomically rename
   it over the state file.

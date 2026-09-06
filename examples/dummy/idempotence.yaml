@@ -1,7 +1,0 @@
-- name: CVD idempotence stub
-  hosts: all
-  gather_facts: false
-  tasks:
-    - name: Report idempotence
-      ansible.builtin.debug:
-        msg: CVD idempotence stub

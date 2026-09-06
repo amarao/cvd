@@ -56,34 +56,6 @@ impl Scenario {
 #[derive(Debug)]
 pub(crate) struct PhaseDefinition {
     _value: serde_yaml::Value,
-    ansible_playbooks: Vec<PathBuf>,
-    ansible_create: Option<AnsibleCreateDefinition>,
-}
-
-impl PhaseDefinition {
-    pub(crate) fn ansible_playbooks(&self) -> &[PathBuf] {
-        &self.ansible_playbooks
-    }
-
-    pub(crate) fn ansible_create(&self) -> Option<&AnsibleCreateDefinition> {
-        self.ansible_create.as_ref()
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct AnsibleCreateDefinition {
-    pub(crate) playbook: PathBuf,
-    pub(crate) group: String,
-    pub(crate) hosts_path: Vec<String>,
-    pub(crate) inventory: serde_json::Value,
-    pub(crate) resources: IndexMap<String, BTreeMap<String, serde_json::Value>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawAnsibleCreate {
-    playbook: String,
-    group: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -329,7 +301,6 @@ impl Config {
             base,
             &mut include_stack,
             &mut source_material,
-            &raw.converger,
             None,
         )?;
         let config = Self {
@@ -393,20 +364,12 @@ fn resolve_named_scenarios(
     base: Option<&Path>,
     include_stack: &mut Vec<PathBuf>,
     source_material: &mut String,
-    default_converger: &str,
     parent: Option<&str>,
 ) -> Result<ScenarioMap, ConfigError> {
     let mut scenarios = IndexMap::new();
     for (name, raw_scenario) in raw.0 {
         let path = parent.map_or_else(|| name.clone(), |parent| format!("{parent}/{name}"));
-        let scenario = resolve_scenario(
-            raw_scenario,
-            base,
-            include_stack,
-            source_material,
-            default_converger,
-            &path,
-        )?;
+        let scenario = resolve_scenario(raw_scenario, base, include_stack, source_material, &path)?;
         scenarios.insert(name, scenario);
     }
     Ok(ScenarioMap(scenarios))
@@ -417,7 +380,6 @@ fn resolve_scenario(
     base: Option<&Path>,
     include_stack: &mut Vec<PathBuf>,
     source_material: &mut String,
-    default_converger: &str,
     path: &str,
 ) -> Result<Scenario, ConfigError> {
     let RawScenario {
@@ -446,36 +408,12 @@ fn resolve_scenario(
         let Some(value) = value.0 else {
             continue;
         };
-        let ansible_create = if phase == ConfiguredPhase::Create {
-            resolve_ansible_create(&value, base).map_err(|reason| ConfigError::InvalidPhase {
-                scenario: path.to_owned(),
-                phase: configured_phase_name(phase),
-                reason,
-            })?
-        } else {
-            None
-        };
-        if ansible_create.is_none() {
-            validate_phase_value(&value).map_err(|reason| ConfigError::InvalidPhase {
-                scenario: path.to_owned(),
-                phase: configured_phase_name(phase),
-                reason,
-            })?;
-        }
-        let ansible_playbooks = resolve_ansible_playbooks(phase, &value, default_converger, base)
-            .map_err(|reason| ConfigError::InvalidPhase {
+        validate_phase_value(&value).map_err(|reason| ConfigError::InvalidPhase {
             scenario: path.to_owned(),
             phase: configured_phase_name(phase),
             reason,
         })?;
-        phases.insert(
-            phase,
-            PhaseDefinition {
-                _value: value,
-                ansible_playbooks,
-                ansible_create,
-            },
-        );
+        phases.insert(phase, PhaseDefinition { _value: value });
     }
 
     let mut child_scenarios = IndexMap::new();
@@ -517,7 +455,6 @@ fn resolve_scenario(
                 canonical.parent(),
                 include_stack,
                 source_material,
-                default_converger,
                 &child_path,
             );
             include_stack.pop();
@@ -528,7 +465,6 @@ fn resolve_scenario(
                 base,
                 include_stack,
                 source_material,
-                default_converger,
                 &child_path,
             )?
         };
@@ -580,10 +516,7 @@ fn validate_scenarios(
 }
 
 fn validate_implementation(implementation: &str) -> Result<(), String> {
-    if matches!(
-        implementation,
-        "dummy" | "ansible" | "terraform" | "pytest" | "exec"
-    ) {
+    if implementation == "dummy" {
         Ok(())
     } else {
         Err(format!("unsupported implementation `{implementation}`"))
@@ -606,7 +539,7 @@ fn validate_phase_value(value: &serde_yaml::Value) -> Result<(), String> {
                 .all(|action| matches!(action, serde_yaml::Value::Mapping(_)));
             if !strings && !mappings {
                 return Err(
-                    "a list must contain only playbook names or only adapter mappings".to_owned(),
+                    "a list must contain only scalar values or only adapter mappings".to_owned(),
                 );
             }
             if mappings {
@@ -632,243 +565,6 @@ fn validate_action_mapping(mapping: &serde_yaml::Mapping) -> Result<(), String> 
         return Err("an adapter name must be a string".to_owned());
     };
     validate_implementation(adapter)
-}
-
-fn resolve_ansible_create(
-    value: &serde_yaml::Value,
-    base: Option<&Path>,
-) -> Result<Option<AnsibleCreateDefinition>, String> {
-    let serde_yaml::Value::Mapping(mapping) = value else {
-        return Ok(None);
-    };
-    let ansible_key = serde_yaml::Value::String("ansible".to_owned());
-    let Some(raw_ansible) = mapping.get(&ansible_key) else {
-        return Ok(None);
-    };
-    let ansible: RawAnsibleCreate = serde_yaml::from_value(raw_ansible.clone())
-        .map_err(|error| format!("invalid Ansible provisioner options: {error}"))?;
-    let playbook = resolve_playbook(&ansible.playbook, base)?;
-
-    let mut inventory_mapping = mapping.clone();
-    inventory_mapping.remove(&ansible_key);
-    if inventory_mapping.is_empty() {
-        return Err("Ansible create requires inline inventory data".to_owned());
-    }
-    let source_inventory = serde_yaml::Value::Mapping(inventory_mapping);
-    let group = ansible.group.clone();
-    let segments = group.split('.').map(str::to_owned).collect::<Vec<_>>();
-    if segments.iter().any(|segment| segment.is_empty()) {
-        return Err(
-            "Ansible create group must be a group name or dotted inventory path".to_owned(),
-        );
-    }
-    let selected = if segments.len() == 1 {
-        let resources = source_inventory
-            .get("resources")
-            .and_then(|value| value.get("hosts"))
-            .ok_or_else(|| {
-                "Ansible create group name requires `resources.hosts` inventory".to_owned()
-            })?;
-        resources.clone()
-    } else {
-        let mut selected = &source_inventory;
-        for segment in &segments {
-            let serde_yaml::Value::Mapping(mapping) = selected else {
-                return Err(format!(
-                    "inventory path `{}` is not a mapping",
-                    ansible.group
-                ));
-            };
-            selected = mapping
-                .get(serde_yaml::Value::String(segment.clone()))
-                .ok_or_else(|| format!("inventory path `{}` does not exist", ansible.group))?;
-        }
-        selected.clone()
-    };
-    let serde_yaml::Value::Mapping(hosts) = &selected else {
-        return Err(format!(
-            "inventory path `{}` is not a host mapping",
-            ansible.group
-        ));
-    };
-    let mut resources = IndexMap::new();
-    for (host, variables) in hosts {
-        let serde_yaml::Value::String(host) = host else {
-            return Err("resource inventory host names must be strings".to_owned());
-        };
-        let attributes = match variables {
-            serde_yaml::Value::Null => BTreeMap::new(),
-            serde_yaml::Value::Mapping(_) => serde_json::from_value(
-                serde_json::to_value(variables)
-                    .map_err(|error| format!("cannot encode variables for `{host}`: {error}"))?,
-            )
-            .map_err(|error| format!("invalid variables for `{host}`: {error}"))?,
-            _ => return Err(format!("variables for resource `{host}` must be a mapping")),
-        };
-        resources.insert(host.clone(), attributes);
-    }
-    let inventory_value = if segments.len() == 1 {
-        let mut group = serde_yaml::Mapping::new();
-        group.insert(serde_yaml::Value::String("hosts".to_owned()), selected);
-        let mut inventory = serde_yaml::Mapping::new();
-        inventory.insert(
-            serde_yaml::Value::String(ansible.group.clone()),
-            serde_yaml::Value::Mapping(group),
-        );
-        serde_yaml::Value::Mapping(inventory)
-    } else {
-        source_inventory
-    };
-    let inventory = serde_json::to_value(&inventory_value)
-        .map_err(|error| format!("cannot encode Ansible inventory: {error}"))?;
-    Ok(Some(AnsibleCreateDefinition {
-        playbook,
-        group,
-        hosts_path: if segments.len() == 1 {
-            vec![segments[0].clone(), "hosts".to_owned()]
-        } else {
-            segments
-        },
-        inventory,
-        resources,
-    }))
-}
-
-fn resolve_ansible_playbooks(
-    phase: ConfiguredPhase,
-    value: &serde_yaml::Value,
-    default_converger: &str,
-    base: Option<&Path>,
-) -> Result<Vec<PathBuf>, String> {
-    if !matches!(
-        phase,
-        ConfiguredPhase::Prepare
-            | ConfiguredPhase::Converge
-            | ConfiguredPhase::Idempotence
-            | ConfiguredPhase::Cleanup
-            | ConfiguredPhase::Destroy
-    ) {
-        return Ok(Vec::new());
-    }
-
-    match value {
-        serde_yaml::Value::Mapping(mapping) => {
-            let (adapter, parameters) = action_mapping(mapping);
-            if adapter == "ansible" {
-                resolve_playbook_parameters(parameters, phase, base)
-            } else {
-                Ok(Vec::new())
-            }
-        }
-        serde_yaml::Value::Sequence(actions)
-            if actions
-                .iter()
-                .all(|action| matches!(action, serde_yaml::Value::Mapping(_))) =>
-        {
-            let mut playbooks = Vec::new();
-            for action in actions {
-                let serde_yaml::Value::Mapping(mapping) = action else {
-                    unreachable!("all list items were checked as mappings");
-                };
-                let (adapter, parameters) = action_mapping(mapping);
-                if adapter == "ansible" {
-                    playbooks.extend(resolve_playbook_parameters(parameters, phase, base)?);
-                }
-            }
-            Ok(playbooks)
-        }
-        _ if default_converger == "ansible" && phase == ConfiguredPhase::Destroy => {
-            resolve_optional_default_playbook(phase, value, base)
-        }
-        _ if default_converger == "ansible" => resolve_playbook_parameters(value, phase, base),
-        _ => Ok(Vec::new()),
-    }
-}
-
-fn resolve_optional_default_playbook(
-    phase: ConfiguredPhase,
-    value: &serde_yaml::Value,
-    base: Option<&Path>,
-) -> Result<Vec<PathBuf>, String> {
-    if !matches!(value, serde_yaml::Value::Null) {
-        return resolve_playbook_parameters(value, phase, base);
-    }
-    let base = base.unwrap_or_else(|| Path::new("."));
-    let yaml = base.join(format!("{}.yaml", configured_phase_name(phase)));
-    let yml = base.join(format!("{}.yml", configured_phase_name(phase)));
-    match (yaml.is_file(), yml.is_file()) {
-        (true, false) => Ok(vec![resolve_playbook("destroy.yaml", Some(base))?]),
-        (false, true) => Ok(vec![resolve_playbook("destroy.yml", Some(base))?]),
-        (true, true) => {
-            Err("both default destroy playbooks `destroy.yaml` and `destroy.yml` exist".to_owned())
-        }
-        (false, false) => Ok(Vec::new()),
-    }
-}
-
-fn action_mapping(mapping: &serde_yaml::Mapping) -> (&str, &serde_yaml::Value) {
-    let (adapter, parameters) = mapping
-        .iter()
-        .next()
-        .expect("adapter mappings are validated before resolution");
-    let serde_yaml::Value::String(adapter) = adapter else {
-        unreachable!("adapter mapping keys are validated as strings");
-    };
-    (adapter, parameters)
-}
-
-fn resolve_playbook_parameters(
-    parameters: &serde_yaml::Value,
-    phase: ConfiguredPhase,
-    base: Option<&Path>,
-) -> Result<Vec<PathBuf>, String> {
-    match parameters {
-        serde_yaml::Value::Null => resolve_default_playbook(phase, base).map(|name| vec![name]),
-        serde_yaml::Value::String(name) => Ok(vec![resolve_playbook(name, base)?]),
-        serde_yaml::Value::Sequence(playbooks) => playbooks
-            .iter()
-            .map(|playbook| {
-                let serde_yaml::Value::String(name) = playbook else {
-                    return Err("Ansible playbook lists must contain only strings".to_owned());
-                };
-                resolve_playbook(name, base)
-            })
-            .collect(),
-        _ => Err(
-            "Ansible parameters must be null, a playbook name, or a list of playbook names"
-                .to_owned(),
-        ),
-    }
-}
-
-fn resolve_default_playbook(
-    phase: ConfiguredPhase,
-    base: Option<&Path>,
-) -> Result<PathBuf, String> {
-    let base = base.unwrap_or_else(|| Path::new("."));
-    let phase = configured_phase_name(phase);
-    let yaml_name = format!("{phase}.yaml");
-    let yml_name = format!("{phase}.yml");
-    let yaml_exists = base.join(&yaml_name).is_file();
-    let yml_exists = base.join(&yml_name).is_file();
-    match (yaml_exists, yml_exists) {
-        (true, false) => resolve_playbook(&yaml_name, Some(base)),
-        (false, true) => resolve_playbook(&yml_name, Some(base)),
-        (true, true) => Err(format!(
-            "both default playbooks `{yaml_name}` and `{yml_name}` exist"
-        )),
-        (false, false) => Err(format!(
-            "default playbook `{yaml_name}` or `{yml_name}` was not found"
-        )),
-    }
-}
-
-fn resolve_playbook(name: &str, base: Option<&Path>) -> Result<PathBuf, String> {
-    let path = base.unwrap_or_else(|| Path::new(".")).join(name);
-    fs::canonicalize(&path)
-        .ok()
-        .filter(|path| path.is_file())
-        .ok_or_else(|| format!("playbook `{}` was not found", path.display()))
 }
 
 fn configured_phase_name(phase: ConfiguredPhase) -> &'static str {
@@ -912,7 +608,7 @@ scenarios:
   default:
     create:
     prepare:
-      - exec: prepare-command
+      - dummy: prepare-command
     converge: site.yml
     verify:
     cleanup:
@@ -922,7 +618,7 @@ scenarios:
     nested:
       - name: restart
         create:
-          terraform: tf/restart
+          dummy: ignored
         converge:
         verify:
         destroy:
@@ -978,7 +674,7 @@ scenarios:
         .unwrap();
         let root = directory.join("cvd.yml");
         let yaml = NESTED.replacen(
-            "      - name: restart\n        create:\n          terraform: tf/restart\n        converge:\n        verify:\n        destroy:\n        nested:\n          - name: after\n            create:\n            verify:\n            destroy:\n",
+            "      - name: restart\n        create:\n          dummy: ignored\n        converge:\n        verify:\n        destroy:\n        nested:\n          - name: after\n            create:\n            verify:\n            destroy:\n",
             "      - name: restart\n        include: nested/child.yml\n",
             1,
         );
@@ -1001,119 +697,15 @@ scenarios:
     }
 
     #[test]
-    fn resolves_ansible_defaults_strings_and_playbook_lists_at_load_time() {
-        let directory =
-            std::env::temp_dir().join(format!("cvd-config-ansible-{}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
-        for playbook in ["prepare.yaml", "converge.yml", "first.yml", "second.yml"] {
-            fs::write(directory.join(playbook), "---\n").unwrap();
-        }
-        let root = directory.join("cvd.yml");
-        let yaml = r#"
-version: 1
-provisioner: dummy
-converger: ansible
-verifier: dummy
-scenarios:
-  default:
-    prepare:
-    converge: converge.yml
-    idempotence: [first.yml, second.yml]
-    cleanup:
-      ansible: [second.yml, first.yml]
-"#;
-        let config = Config::from_yaml_at(yaml, &root).unwrap();
-        let scenario = config.scenario("default").unwrap();
-        assert_eq!(
-            scenario
-                .phase(ConfiguredPhase::Prepare)
-                .unwrap()
-                .ansible_playbooks(),
-            [directory.join("prepare.yaml")]
-        );
-        assert_eq!(
-            scenario
-                .phase(ConfiguredPhase::Converge)
-                .unwrap()
-                .ansible_playbooks(),
-            [directory.join("converge.yml")]
-        );
-        assert_eq!(
-            scenario
-                .phase(ConfiguredPhase::Idempotence)
-                .unwrap()
-                .ansible_playbooks(),
-            [directory.join("first.yml"), directory.join("second.yml")]
-        );
-        assert_eq!(
-            scenario
-                .phase(ConfiguredPhase::Cleanup)
-                .unwrap()
-                .ansible_playbooks(),
-            [directory.join("second.yml"), directory.join("first.yml")]
-        );
-
-        fs::write(directory.join("prepare.yml"), "---\n").unwrap();
-        assert!(matches!(
-            Config::from_yaml_at(yaml, &root),
-            Err(ConfigError::InvalidPhase { .. })
-        ));
-        fs::remove_file(directory.join("prepare.yml")).unwrap();
-        fs::remove_file(directory.join("converge.yml")).unwrap();
-        assert!(matches!(
-            Config::from_yaml_at(yaml, &root),
-            Err(ConfigError::InvalidPhase { .. })
-        ));
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn repository_example_uses_the_supported_structure() {
         let path = fs::canonicalize("examples/dummy/cvd.yml").unwrap();
         let yaml = fs::read_to_string(&path).unwrap();
         let config = Config::from_yaml_at(&yaml, &path).unwrap();
-        assert!(
-            config
-                .scenario("default/install/configuration-check")
-                .is_some()
-        );
-        assert!(
-            config
-                .scenario("default/install/Upgrade scenario")
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn minimal_provisioner_example_uses_one_scenario_and_only_its_enabled_phases() {
-        let path = fs::canonicalize("examples/minimal-provisioner/cvd.yml").unwrap();
-        let yaml = fs::read_to_string(&path).unwrap();
-        let config = Config::from_yaml_at(&yaml, &path).unwrap();
-
         assert_eq!(config.scenarios.iter().count(), 1);
-        assert_eq!(config.provisioner, "dummy");
-        let scenario = config.scenario("provisioned-resource").unwrap();
-        for phase in [
-            ConfiguredPhase::Create,
-            ConfiguredPhase::Converge,
-            ConfiguredPhase::Verify,
-            ConfiguredPhase::Destroy,
-        ] {
-            assert!(scenario.has_phase(phase));
-        }
-        for phase in [ConfiguredPhase::Dependency, ConfiguredPhase::Idempotence] {
-            assert!(!scenario.has_phase(phase));
-        }
+        let scenario = config.scenario("default").unwrap();
+        assert!(scenario.has_phase(ConfiguredPhase::Create));
+        assert!(scenario.has_phase(ConfiguredPhase::Destroy));
         assert!(scenario.scenarios.iter().next().is_none());
-        let create = scenario
-            .phase(ConfiguredPhase::Create)
-            .unwrap()
-            .ansible_create()
-            .unwrap();
-        assert_eq!(create.group, "mygroup2");
-        assert_eq!(create.resources["vm1"]["flavor"], "SSD.30");
-        assert_eq!(create.resources["vm2"]["flavor"], "SSD.40");
-        assert_eq!(create.playbook, path.parent().unwrap().join("create.yaml"));
     }
 
     #[test]
@@ -1201,8 +793,8 @@ scenarios:
         ));
 
         let malformed_action = NESTED.replacen(
-            "      - exec: prepare-command",
-            "      - exec: prepare-command\n        dummy: second-action",
+            "      - dummy: prepare-command",
+            "      - dummy: prepare-command\n        other: second-action",
             1,
         );
         assert!(matches!(

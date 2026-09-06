@@ -70,15 +70,6 @@ Do not add a separate side-effect lifecycle unless requirements change.
   ancestor setup chain needed to reach it and skips unrelated siblings.
 - Represent children as an ordered `nested` list with named inline scenarios or
   relative scenario-fragment includes.
-- Resolve Ansible converger playbooks at configuration load time relative to
-  the containing scenario file; reject missing or ambiguous default playbooks.
-- Run `ansible-playbook` with resolved paths from the root configuration
-  directory; classify launch failures and non-zero exits as phase errors.
-- For an Ansible `create`, treat the phase mapping apart from `ansible` options
-  as generated inventory. Select resources using its configured group name or
-  dotted path, pass that inventory through `ANSIBLE_INVENTORY` to later Ansible
-  phases, merge facts from successful `set_fact` tasks into host attributes, and
-  use `public_ip` as `ansible_host` when no explicit host address exists.
 - Run remaining applicable cleanup and destroy operations after an error in
   cleanup or destroy, while skipping later child, converge, and verify work.
 - Allow explicit keep mode to suppress cleanup or destruction for inspection.

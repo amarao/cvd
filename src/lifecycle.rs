@@ -308,18 +308,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         // The provider is still called when either reporting step fails; this
         // preserves best-effort destruction.
         let _ = self.write_phase_running(path, &LifecyclePhase::Destroy);
-        let definition = scenario
-            .phase(ConfiguredPhase::Destroy)
-            .expect("destroy phase presence was checked");
-        let inventory = self.ansible_inventory(scenario, path);
-        match self.provisioner.destroy(
-            path,
-            &resources,
-            definition.ansible_playbooks(),
-            inventory.as_ref(),
-            &mut self.output,
-            self.styled_output,
-        ) {
+        match self.provisioner.destroy(path, &resources) {
             Ok(()) => {
                 self.state.mark_resources_destroyed(path);
                 let completion_error = self
@@ -367,12 +356,10 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         let definition = scenario
             .phase(configured_phase(&phase))
             .expect("enabled converger phases have a definition");
-        let inventory = self.ansible_inventory(scenario, path);
         match self.converger.run(
             path,
             phase.clone(),
             definition,
-            inventory.as_ref(),
             &mut self.output,
             self.styled_output,
         ) {
@@ -382,31 +369,6 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
                 true
             }
         }
-    }
-
-    fn ansible_inventory(&self, scenario: &Scenario, path: &str) -> Option<serde_json::Value> {
-        let create = scenario
-            .phase(ConfiguredPhase::Create)
-            .and_then(|definition| definition.ansible_create())?;
-        let mut inventory = create.inventory.clone();
-        let mut selected = &mut inventory;
-        for segment in &create.hosts_path {
-            selected = selected.get_mut(segment)?;
-        }
-        let hosts = selected.as_object_mut()?;
-        let resources = self.state.scenarios.get(path)?.resources.resources.iter();
-        for resource in resources {
-            let host = hosts.get_mut(&resource.id)?.as_object_mut()?;
-            for (name, value) in &resource.attributes {
-                host.insert(name.clone(), value.clone());
-            }
-            if !host.contains_key("ansible_host")
-                && let Some(public_ip) = resource.attributes.get("public_ip")
-            {
-                host.insert("ansible_host".to_owned(), public_ip.clone());
-            }
-        }
-        Some(inventory)
     }
 
     fn execution_error(&mut self, path: &str, phase: LifecyclePhase, message: String) {
@@ -932,9 +894,9 @@ scenarios:
             let [resource] = scenario.resources.resources.as_slice() else {
                 return false;
             };
-            resource.id == "dummy"
-                && resource.resource_type == "dummy"
-                && resource.attributes["ipv6"] == "::1"
+            resource.id == "mock"
+                && resource.resource_type == "mock"
+                && resource.attributes.is_empty()
                 && !resource.exists
                 && resource.created.scenario_path == scenario.path
                 && resource.created.phase == LifecyclePhase::Create
@@ -1204,10 +1166,6 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &ResourceManifest,
-            _: &[std::path::PathBuf],
-            _: Option<&serde_json::Value>,
-            _: &mut dyn std::io::Write,
-            _: bool,
         ) -> Result<(), ProvisionerError> {
             self.calls
                 .borrow_mut()
@@ -1263,10 +1221,6 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &ResourceManifest,
-            _: &[std::path::PathBuf],
-            _: Option<&serde_json::Value>,
-            _: &mut dyn std::io::Write,
-            _: bool,
         ) -> Result<(), ProvisionerError> {
             self.0.borrow_mut().push(format!("destroy:{scenario_path}"));
             Ok(())
@@ -1333,10 +1287,6 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &ResourceManifest,
-            _: &[std::path::PathBuf],
-            _: Option<&serde_json::Value>,
-            _: &mut dyn std::io::Write,
-            _: bool,
         ) -> Result<(), ProvisionerError> {
             self.0.borrow_mut().push(format!("destroy:{scenario_path}"));
             Ok(())
