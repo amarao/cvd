@@ -58,6 +58,35 @@ pub(crate) struct PhaseDefinition {
     _value: serde_yaml::Value,
 }
 
+impl PhaseDefinition {
+    pub(crate) fn dummy_status(&self) -> DummyStatus {
+        let serde_yaml::Value::Mapping(action) = &self._value else {
+            return DummyStatus::Ok;
+        };
+        let options = action
+            .get(serde_yaml::Value::String("dummy".to_owned()))
+            .expect("dummy action mappings are validated");
+        parse_dummy_options(options)
+            .expect("dummy action options are validated")
+            .status
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DummyStatus {
+    #[default]
+    Ok,
+    Error,
+    Fail,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DummyOptions {
+    status: DummyStatus,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfiguredPhase {
     Dependency,
@@ -75,6 +104,8 @@ pub enum ConfiguredPhase {
 pub struct Test {
     #[serde(default)]
     pub verifier: Option<String>,
+    #[serde(default)]
+    pub(crate) status: DummyStatus,
 }
 
 #[derive(Debug, Default)]
@@ -564,7 +595,20 @@ fn validate_action_mapping(mapping: &serde_yaml::Mapping) -> Result<(), String> 
     let serde_yaml::Value::String(adapter) = adapter else {
         return Err("an adapter name must be a string".to_owned());
     };
-    validate_implementation(adapter)
+    validate_implementation(adapter)?;
+    let options = mapping.values().next().expect("mapping length was checked");
+    let options = parse_dummy_options(options)?;
+    if options.status == DummyStatus::Fail {
+        return Err("dummy phase status must be `ok` or `error`".to_owned());
+    }
+    Ok(())
+}
+
+fn parse_dummy_options(value: &serde_yaml::Value) -> Result<DummyOptions, String> {
+    if matches!(value, serde_yaml::Value::Null) {
+        return Ok(DummyOptions::default());
+    }
+    serde_yaml::from_value(value.clone()).map_err(|error| format!("invalid dummy options: {error}"))
 }
 
 fn configured_phase_name(phase: ConfiguredPhase) -> &'static str {
@@ -608,7 +652,7 @@ scenarios:
   default:
     create:
     prepare:
-      - dummy: prepare-command
+      - dummy:
     converge: site.yml
     verify:
     cleanup:
@@ -618,7 +662,7 @@ scenarios:
     nested:
       - name: restart
         create:
-          dummy: ignored
+          dummy:
         converge:
         verify:
         destroy:
@@ -674,7 +718,7 @@ scenarios:
         .unwrap();
         let root = directory.join("cvd.yml");
         let yaml = NESTED.replacen(
-            "      - name: restart\n        create:\n          dummy: ignored\n        converge:\n        verify:\n        destroy:\n        nested:\n          - name: after\n            create:\n            verify:\n            destroy:\n",
+            "      - name: restart\n        create:\n          dummy:\n        converge:\n        verify:\n        destroy:\n        nested:\n          - name: after\n            create:\n            verify:\n            destroy:\n",
             "      - name: restart\n        include: nested/child.yml\n",
             1,
         );
@@ -793,13 +837,47 @@ scenarios:
         ));
 
         let malformed_action = NESTED.replacen(
-            "      - dummy: prepare-command",
-            "      - dummy: prepare-command\n        other: second-action",
+            "      - dummy:",
+            "      - dummy:\n        other: second-action",
             1,
         );
         assert!(matches!(
             Config::from_yaml(&malformed_action),
             Err(ConfigError::InvalidPhase { .. })
+        ));
+    }
+
+    #[test]
+    fn validates_dummy_phase_and_test_statuses() {
+        let valid = NESTED
+            .replacen(
+                "    create:",
+                "    create:\n      dummy:\n        status: error",
+                1,
+            )
+            .replacen("      smoke: {}", "      smoke:\n        status: fail", 1);
+        Config::from_yaml(&valid).unwrap();
+
+        for options in ["status: fail", "status: unknown", "unknown: true"] {
+            let invalid = NESTED.replacen(
+                "    create:",
+                &format!("    create:\n      dummy:\n        {options}"),
+                1,
+            );
+            assert!(matches!(
+                Config::from_yaml(&invalid),
+                Err(ConfigError::InvalidPhase { .. })
+            ));
+        }
+
+        let invalid_test = NESTED.replacen(
+            "      smoke: {}",
+            "      smoke:\n        status: unknown",
+            1,
+        );
+        assert!(matches!(
+            Config::from_yaml(&invalid_test),
+            Err(ConfigError::Parse(_))
         ));
     }
 

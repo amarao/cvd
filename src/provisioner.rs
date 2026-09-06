@@ -1,7 +1,7 @@
 //! Provisioner interface and the mock implementation used by the dummy stub.
 
 use crate::{
-    config::PhaseDefinition,
+    config::{DummyStatus, PhaseDefinition},
     state::{LifecyclePhase, Resource, ResourceLocation, ResourceManifest},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,6 +18,7 @@ pub trait Provisioner {
         &self,
         scenario_path: &str,
         resources: &ResourceManifest,
+        definition: &PhaseDefinition,
     ) -> Result<(), ProvisionerError>;
 }
 
@@ -29,8 +30,13 @@ impl Provisioner for DummyProvisioner {
     fn create(
         &self,
         scenario_path: &str,
-        _definition: &PhaseDefinition,
+        definition: &PhaseDefinition,
     ) -> Result<ResourceManifest, ProvisionerError> {
+        if definition.dummy_status() == DummyStatus::Error {
+            return Err(ProvisionerError(format!(
+                "dummy create error for `{scenario_path}`"
+            )));
+        }
         Ok(ResourceManifest {
             resources: vec![Resource {
                 id: "mock".to_owned(),
@@ -52,8 +58,13 @@ impl Provisioner for DummyProvisioner {
         &self,
         _scenario_path: &str,
         _resources: &ResourceManifest,
+        definition: &PhaseDefinition,
     ) -> Result<(), ProvisionerError> {
-        Ok(())
+        match definition.dummy_status() {
+            DummyStatus::Ok => Ok(()),
+            DummyStatus::Error => Err(ProvisionerError("dummy destroy error".to_owned())),
+            DummyStatus::Fail => unreachable!("phase status is validated"),
+        }
     }
 }
 

@@ -6,11 +6,19 @@ verifier: dummy
 scenarios:
   default:
     create:
+      dummy:
+        status: ok
     prepare:
     converge:
+      dummy:
+        status: ok
     idempotence:
     verify:
     cleanup:
     destroy:
+      dummy:
+        status: ok
     tests:
-      smoke: {}
+      smoke:
+        verifier: dummy
+        status: ok

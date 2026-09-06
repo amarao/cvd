@@ -3,12 +3,18 @@
 ## Goal
 
 The dummy executable validates configuration, lifecycle ordering, selection,
-state persistence, and reporting without invoking external tools.
+state persistence, reporting, and failure paths without invoking external
+tools.
 
 - The dummy provisioner creates one fixed mock resource for every enabled
   `create` phase and only pretends to destroy it.
 - The dummy converger pretends that every enabled converger phase succeeds.
-- The dummy verifier returns `pass` for every named test.
+- The dummy verifier returns the configured result for every named test.
+
+Every dummy phase adapter accepts a `status` option. `ok` makes the operation
+succeed and `error` makes it return an execution error. Dummy tests accept
+`ok`, `fail`, or `error`; `fail` represents an assertion failure while `error`
+represents a verifier execution error. The option defaults to `ok`.
 
 The lifecycle core records the fixed resource as destroyed after `destroy`
 succeeds. It has ID `mock`, type `mock`, and no attributes. Creation and
@@ -34,13 +40,21 @@ verifier: dummy
 scenarios:
   default:
     create:
+      dummy:
+        status: ok
     prepare:
     converge:
+      dummy:
+        status: ok
     verify:
     cleanup:
     destroy:
+      dummy:
+        status: ok
     tests:
-      smoke: {}
+      smoke:
+        verifier: dummy
+        status: ok
 ```
 
 No real provisioner, converger, verifier, inventory generation, playbook

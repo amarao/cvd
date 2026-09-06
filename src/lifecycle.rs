@@ -250,8 +250,8 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             return true;
         }
 
-        for (test_name, _) in scenario.tests.iter() {
-            match self.verifier.verify(path, test_name) {
+        for (test_name, test) in scenario.tests.iter() {
+            match self.verifier.verify(path, test_name, test) {
                 Ok(status) => {
                     let verifier_error = status == VerifierStatus::Error;
                     if status == VerifierStatus::Fail {
@@ -308,7 +308,10 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         // The provider is still called when either reporting step fails; this
         // preserves best-effort destruction.
         let _ = self.write_phase_running(path, &LifecyclePhase::Destroy);
-        match self.provisioner.destroy(path, &resources) {
+        let definition = scenario
+            .phase(ConfiguredPhase::Destroy)
+            .expect("destroy phase presence was checked");
+        match self.provisioner.destroy(path, &resources, definition) {
             Ok(()) => {
                 self.state.mark_resources_destroyed(path);
                 let completion_error = self
@@ -1095,6 +1098,7 @@ scenarios:
             &self,
             _scenario_path: &str,
             _test_name: &str,
+            _: &crate::config::Test,
         ) -> Result<VerifierStatus, crate::verifier::VerifierError> {
             Ok(VerifierStatus::Error)
         }
@@ -1166,6 +1170,7 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &ResourceManifest,
+            _: &crate::config::PhaseDefinition,
         ) -> Result<(), ProvisionerError> {
             self.calls
                 .borrow_mut()
@@ -1221,6 +1226,7 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &ResourceManifest,
+            _: &crate::config::PhaseDefinition,
         ) -> Result<(), ProvisionerError> {
             self.0.borrow_mut().push(format!("destroy:{scenario_path}"));
             Ok(())
@@ -1287,6 +1293,7 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &ResourceManifest,
+            _: &crate::config::PhaseDefinition,
         ) -> Result<(), ProvisionerError> {
             self.0.borrow_mut().push(format!("destroy:{scenario_path}"));
             Ok(())

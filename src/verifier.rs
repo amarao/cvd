@@ -2,15 +2,22 @@
 
 use thiserror::Error;
 
-use crate::state::VerifierStatus;
+use crate::{
+    config::{DummyStatus, Test},
+    state::VerifierStatus,
+};
 
 /// Runs one named verifier invocation in a scenario.
 pub trait Verifier {
-    fn verify(&self, scenario_path: &str, test_name: &str)
-    -> Result<VerifierStatus, VerifierError>;
+    fn verify(
+        &self,
+        scenario_path: &str,
+        test_name: &str,
+        test: &Test,
+    ) -> Result<VerifierStatus, VerifierError>;
 }
 
-/// The sole verifier in the dummy stub.  It runs no tests and passes.
+/// Returns the configured dummy result without running an external test.
 #[derive(Debug, Default)]
 pub struct DummyVerifier;
 
@@ -19,8 +26,13 @@ impl Verifier for DummyVerifier {
         &self,
         _scenario_path: &str,
         _test_name: &str,
+        test: &Test,
     ) -> Result<VerifierStatus, VerifierError> {
-        Ok(VerifierStatus::Pass)
+        Ok(match test.status {
+            DummyStatus::Ok => VerifierStatus::Pass,
+            DummyStatus::Fail => VerifierStatus::Fail,
+            DummyStatus::Error => VerifierStatus::Error,
+        })
     }
 }
 

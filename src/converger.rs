@@ -1,6 +1,9 @@
 //! Converger interface and the no-op implementation used by the dummy stub.
 
-use crate::{config::PhaseDefinition, state::LifecyclePhase};
+use crate::{
+    config::{DummyStatus, PhaseDefinition},
+    state::LifecyclePhase,
+};
 use std::io::Write;
 use thiserror::Error;
 
@@ -22,13 +25,19 @@ pub struct DummyConverger;
 impl Converger for DummyConverger {
     fn run(
         &self,
-        _scenario_path: &str,
-        _phase: LifecyclePhase,
-        _definition: &PhaseDefinition,
+        scenario_path: &str,
+        phase: LifecyclePhase,
+        definition: &PhaseDefinition,
         _output: &mut dyn Write,
         _styled_output: bool,
     ) -> Result<(), ConvergerError> {
-        Ok(())
+        match definition.dummy_status() {
+            DummyStatus::Ok => Ok(()),
+            DummyStatus::Error => Err(ConvergerError(format!(
+                "dummy {phase:?} error for `{scenario_path}`"
+            ))),
+            DummyStatus::Fail => unreachable!("phase status is validated"),
+        }
     }
 }
 

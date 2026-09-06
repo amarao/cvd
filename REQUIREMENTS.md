@@ -141,7 +141,10 @@ top level. The current stub supports only `dummy`; an omitted provisioner
 defaults to it. Phase values remain opaque adapter input but do not alter dummy
 behavior. The dummy provisioner returns one resource with ID and type `mock`,
 the dummy converger performs no action, and the dummy verifier passes every
-named test. Real adapters and external command execution are deferred.
+named test by default. Dummy phase adapter input accepts `status: ok|error`.
+Dummy tests accept `status: ok|fail|error`. These controls exercise lifecycle
+result handling without external calls. Real adapters and external command
+execution are deferred.
 
 Child scenarios are declared in an ordered `nested` list. Each entry has a
 `name` and either an inline scenario body or an `include` path. An included file

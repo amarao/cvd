@@ -388,3 +388,117 @@ fn state_report_rejects_absent_unsafe_and_unknown_runs() {
         fs::remove_dir_all(directory).expect("remove only test directory");
     }
 }
+
+#[test]
+fn full_dummy_example_runs_every_phase_successfully() {
+    let directory = test_directory("dummy-full");
+    let state_directory = directory.join("state");
+    let configuration = fs::canonicalize("examples/dummy-full/cvd.yml").unwrap();
+    let output = run(&[
+        "run",
+        "--file",
+        configuration.to_str().unwrap(),
+        "--state-dir",
+        state_directory.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = load_state(
+        &state_directory
+            .join("runs")
+            .join(last_run_id(&state_directory))
+            .join("state.json"),
+    );
+    let scenario = &state["scenarios"]["full-dummy-lifecycle"];
+    for phase in [
+        "dependency",
+        "create",
+        "prepare",
+        "converge",
+        "idempotence",
+        "verify",
+        "cleanup",
+        "destroy",
+    ] {
+        assert_eq!(scenario["phases"][phase]["status"], "pass", "phase {phase}");
+    }
+    assert_eq!(scenario["test_results"][0]["status"], "pass");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn dummy_status_options_control_errors_and_verifier_failures() {
+    let directory = test_directory("dummy-statuses");
+    fs::create_dir_all(&directory).unwrap();
+    let configuration = directory.join("cvd.yml");
+    fs::write(
+        &configuration,
+        r#"version: 1
+provisioner: dummy
+converger: dummy
+verifier: dummy
+scenarios:
+  create-error:
+    create: {dummy: {status: error}}
+    destroy: {dummy: {status: ok}}
+  converge-error:
+    create: {dummy: {status: ok}}
+    converge: {dummy: {status: error}}
+    cleanup: {dummy: {status: ok}}
+    destroy: {dummy: {status: ok}}
+  verifier-fail:
+    create: {dummy: {status: ok}}
+    verify: {dummy: {status: ok}}
+    destroy: {dummy: {status: ok}}
+    tests:
+      assertion: {verifier: dummy, status: fail}
+  verifier-error:
+    create: {dummy: {status: ok}}
+    verify: {dummy: {status: ok}}
+    destroy: {dummy: {status: ok}}
+    tests:
+      broken: {verifier: dummy, status: error}
+  destroy-error:
+    create: {dummy: {status: ok}}
+    destroy: {dummy: {status: error}}
+"#,
+    )
+    .unwrap();
+    for (selector, result_path, expected) in [
+        ("create-error", "/phases/create/status", "error"),
+        ("converge-error", "/phases/converge/status", "error"),
+        ("verifier-fail", "/test_results/0/status", "fail"),
+        ("verifier-error", "/test_results/0/status", "error"),
+        ("destroy-error", "/phases/destroy/status", "error"),
+    ] {
+        let state_directory = directory.join(format!("state-{selector}"));
+        let output = run(&[
+            "run",
+            selector,
+            "--file",
+            configuration.to_str().unwrap(),
+            "--state-dir",
+            state_directory.to_str().unwrap(),
+        ]);
+        assert!(!output.status.success(), "selector {selector}");
+        let state = load_state(
+            &state_directory
+                .join("runs")
+                .join(last_run_id(&state_directory))
+                .join("state.json"),
+        );
+        let scenario = &state["scenarios"][selector];
+        assert_eq!(
+            scenario.pointer(result_path).unwrap(),
+            expected,
+            "selector {selector}"
+        );
+        if selector == "destroy-error" {
+            assert_eq!(scenario["resources"]["resources"][0]["exists"], true);
+        }
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
