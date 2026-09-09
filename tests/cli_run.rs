@@ -452,15 +452,13 @@ scenarios:
     destroy: {dummy: {status: ok}}
   verifier-fail:
     create: {dummy: {status: ok}}
-    verify: {dummy: {status: ok}}
     destroy: {dummy: {status: ok}}
-    tests:
+    verify:
       assertion: {verifier: dummy, status: fail}
   verifier-error:
     create: {dummy: {status: ok}}
-    verify: {dummy: {status: ok}}
     destroy: {dummy: {status: ok}}
-    tests:
+    verify:
       broken: {verifier: dummy, status: error}
   destroy-error:
     create: {dummy: {status: ok}}
@@ -577,8 +575,14 @@ fi
     assert_eq!(create["cvd"]["action"], "create");
     assert_eq!(create["cvd"]["vars"]["requested_name"], "example");
     assert_eq!(create["cvd"]["resources"], serde_json::json!([]));
+    for field in ["input_file", "result_file"] {
+        assert!(Path::new(create["cvd"][field].as_str().unwrap()).is_absolute());
+    }
     let destroy = load_state(&destroy_input);
     assert_eq!(destroy["cvd"]["action"], "destroy");
+    for field in ["input_file", "result_file", "invocation_id"] {
+        assert_ne!(create["cvd"][field], destroy["cvd"][field]);
+    }
     assert_eq!(destroy["cvd"]["resources"][0]["id"], "container-123");
     assert_eq!(destroy["cvd"]["resources"][0]["type"], "docker.container");
     assert_eq!(destroy["cvd"]["resources"][0]["exists"], true);
@@ -595,4 +599,394 @@ fi
     assert_eq!(resource["destroyed"]["phase"], "destroy");
     assert_eq!(resource["exists"], false);
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn ansible_inventory_overlay_preserves_sources_and_cleanup_after_errors() {
+    for mode in [
+        "pass",
+        "converge-error",
+        "unknown-host",
+        "duplicate",
+        "malformed",
+        "keep",
+    ] {
+        let directory = test_directory(&format!("inventory-{mode}"));
+        let bin = directory.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for playbook in ["create.yml", "converge.yml", "cleanup.yml", "destroy.yml"] {
+            fs::write(directory.join(playbook), "---\n").unwrap();
+        }
+        fs::write(
+            directory.join("inventory.yml"),
+            "all:\n  hosts:\n    web: {}\n",
+        )
+        .unwrap();
+        let configuration = directory.join("cvd.yml");
+        fs::write(&configuration, "version: 1\ninventory: [inventory.yml]\nprovisioner: ansible\nconverger: ansible\nverifier: dummy\nscenarios:\n  host:\n    create:\n      ansible:\n        playbook: create.yml\n    converge:\n      ansible:\n        playbook: converge.yml\n    cleanup:\n      ansible:\n        playbook: cleanup.yml\n    destroy:\n      ansible:\n        playbook: destroy.yml\n").unwrap();
+        let executable = bin.join("ansible-playbook");
+        fs::write(&executable, r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+cvd = json.load(open(os.environ['CVD_INPUT_FILE']))['cvd']
+assert cvd['input_file'] == os.environ['CVD_INPUT_FILE']
+assert cvd['result_file'] == os.environ['CVD_RESULT_FILE']
+assert cvd['invocation_id'] == os.environ['CVD_INVOCATION_ID']
+mode = os.environ['CVD_TEST_MODE']
+args = sys.argv[1:]
+sources = [args[i+1] for i, arg in enumerate(args) if arg == '--inventory']
+assert pathlib.Path(sources[0]).name == ('destroy-inventory.yml' if cvd['action'] == 'destroy' else 'inventory.yml')
+record = {'action': cvd['action'], 'sources': sources, 'resources': cvd['resources']}
+if cvd['action'] == 'create':
+    assert len(sources) == 1
+    binding = {'inventory_hostname': 'typo' if mode == 'unknown-host' else 'web', 'vars': {'ansible_host': 'actual-container', 'ansible_connection': 'local'}}
+    if mode == 'malformed': binding['vars'] = []
+    resources = [{'id': 'container-id', 'type': 'docker.container', 'attributes': {'ansible': binding}}, {'id': 'network-id', 'type': 'docker.network'}]
+    if mode == 'duplicate': resources.append({'id': 'other-id', 'type': 'container', 'attributes': {'ansible': binding}})
+    json.dump({'protocol_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': resources}, open(cvd['result_file'], 'w'))
+elif cvd['action'] in ['converge', 'cleanup']:
+    assert len(sources) == 2
+    record['overlay'] = pathlib.Path(sources[1]).read_text()
+elif cvd['action'] == 'destroy':
+    assert len(sources) == 1
+    assert cvd['resources'][0]['id'] == 'network-id'
+    assert 'container-id' in pathlib.Path(sources[0]).read_text()
+with open(os.environ['CVD_TEST_CAPTURE'], 'a') as f: f.write(json.dumps(record)+'\n')
+if mode == 'converge-error' and cvd['action'] == 'converge': sys.exit(2)
+"#).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let inspect = bin.join("ansible-inventory");
+        fs::write(&inspect, "#!/bin/sh\nprintf '%s\\n' '{\"all\":{\"children\":[\"webservers\"]},\"webservers\":{\"hosts\":[\"web\"]},\"_meta\":{\"hostvars\":{}}}'\n").unwrap();
+        fs::set_permissions(&inspect, fs::Permissions::from_mode(0o755)).unwrap();
+        let capture = directory.join("calls.jsonl");
+        let state_directory = directory.join("state");
+        let mut paths = vec![bin];
+        paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+        let mut invocation = command(&[
+            "run",
+            "--file",
+            configuration.to_str().unwrap(),
+            "--state-dir",
+            state_directory.to_str().unwrap(),
+        ]);
+        if mode == "keep" {
+            invocation.arg("--keep");
+        }
+        let output = invocation
+            .env("PATH", env::join_paths(paths).unwrap())
+            .env("CVD_TEST_MODE", mode)
+            .env("CVD_TEST_CAPTURE", &capture)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            matches!(mode, "pass" | "keep"),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let calls: Vec<Value> = fs::read_to_string(capture)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(calls.first().unwrap()["action"], "create");
+        assert_eq!(
+            calls.last().unwrap()["action"],
+            if mode == "keep" { "cleanup" } else { "destroy" }
+        );
+        let state = load_state(
+            &state_directory
+                .join("runs")
+                .join(last_run_id(&state_directory))
+                .join("state.json"),
+        );
+        let scenario = &state["scenarios"]["host"];
+        assert_eq!(
+            scenario["resources"]["resources"][0]["exists"],
+            mode == "keep"
+        );
+        if matches!(mode, "pass" | "keep" | "converge-error") {
+            let overlay = calls[1]["overlay"].as_str().unwrap();
+            assert!(overlay.contains("actual-container"));
+            assert!(!overlay.contains("network-id"));
+            assert!(
+                Path::new(
+                    scenario["views"]["ansible_inventory"]["attributes"]["path"]
+                        .as_str()
+                        .unwrap()
+                )
+                .exists()
+            );
+            assert_eq!(scenario["phases"]["cleanup"]["status"], "pass");
+        }
+        if !matches!(mode, "pass" | "keep") {
+            assert_eq!(state["primary_error"]["scenario_path"], "host");
+            assert_eq!(state["primary_error"]["phase"], "converge");
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires Ansible, pytest, and pytest-testinfra"]
+fn native_ansible_preserves_group_vars_host_vars_and_default_sources() {
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let destination = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &destination);
+            } else {
+                fs::copy(entry.path(), destination).unwrap();
+            }
+        }
+    }
+    for source in ["explicit", "config", "environment"] {
+        let directory = test_directory(&format!("native-inventory-{source}"));
+        copy_tree(Path::new("tests/fixtures/ansible-inventory"), &directory);
+        let configuration = directory.join("cvd.yml");
+        if source != "explicit" {
+            let yaml = fs::read_to_string(&configuration)
+                .unwrap()
+                .replace("inventory: [inventory.yml]\n", "");
+            fs::write(&configuration, yaml).unwrap();
+        }
+        let state_directory = directory.join("state");
+        let mut invocation = command(&[
+            "run",
+            "--file",
+            configuration.to_str().unwrap(),
+            "--state-dir",
+            state_directory.to_str().unwrap(),
+        ]);
+        invocation
+            .env("ANSIBLE_LOCAL_TEMP", directory.join("local-tmp"))
+            .env("ANSIBLE_REMOTE_TEMP", directory.join("remote-tmp"))
+            .env("ANSIBLE_CONFIG", directory.join("ansible.cfg"))
+            .env_remove("ANSIBLE_INVENTORY");
+        if source == "environment" {
+            // A distinct source proves that the environment overrides cfg.
+            fs::rename(
+                directory.join("inventory.yml"),
+                directory.join("environment.yml"),
+            )
+            .unwrap();
+            invocation.env("ANSIBLE_INVENTORY", directory.join("environment.yml"));
+        }
+        let output = invocation.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{source}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state = load_state(
+            &state_directory
+                .join("runs")
+                .join(last_run_id(&state_directory))
+                .join("state.json"),
+        );
+        let scenario = &state["scenarios"]["native"];
+        assert_eq!(scenario["phases"]["converge"]["status"], "pass");
+        assert_eq!(scenario["phases"]["verify"]["status"], "pass");
+        assert_eq!(scenario["test_results"][0]["status"], "pass");
+        assert_eq!(scenario["resources"]["resources"][0]["exists"], false);
+        assert!(scenario["views"]["ansible_inventory"]["attributes"]["path"].is_string());
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn pytest_receives_inventory_and_all_unsuccessful_exits_are_errors() {
+    for mode in [
+        "pass",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "spawn-error",
+        "keep",
+        "nested",
+        "external-only",
+    ] {
+        let directory = test_directory(&format!("pytest-{mode}"));
+        let bin = directory.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for file in [
+            "create.yml",
+            "destroy.yml",
+            "inventory.yml",
+            "test_example.py",
+        ] {
+            fs::write(directory.join(file), "# test fixture\n").unwrap();
+        }
+        let configuration = directory.join("cvd.yml");
+        let create = if mode == "external-only" {
+            ""
+        } else {
+            "    create:\n      ansible:\n        playbook: create.yml\n"
+        };
+        let yaml = format!(
+            r#"version: 1
+inventory: [inventory.yml]
+provisioner: ansible
+converger: dummy
+verifier: pytest
+scenarios:
+  root:
+{create}    cleanup:
+    destroy:
+      ansible:
+        playbook: destroy.yml
+    verify:
+      first:
+        pytest:
+          path: test_example.py
+          args: ["-k", "a name with spaces", "$(not-a-shell)"]
+      second:
+        verifier: dummy
+    nested:
+      - name: child
+        verify:
+          inherited:
+            pytest:
+              path: test_example.py
+"#
+        );
+        fs::write(&configuration, yaml).unwrap();
+        let ansible = bin.join("ansible-playbook");
+        fs::write(&ansible, r#"#!/usr/bin/env python3
+import json, os
+cvd = json.load(open(os.environ['CVD_INPUT_FILE']))['cvd']
+assert cvd['input_file'] == os.environ['CVD_INPUT_FILE']
+assert cvd['result_file'] == os.environ['CVD_RESULT_FILE']
+assert cvd['invocation_id'] == os.environ['CVD_INVOCATION_ID']
+if cvd['action'] == 'create':
+    json.dump({'protocol_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': [{'id': 'actual-web', 'type': 'container', 'attributes': {'ansible': {'inventory_hostname': 'web', 'vars': {'ansible_host': 'runtime-web'}}}}]}, open(cvd['result_file'], 'w'))
+else:
+    json.dump(cvd['resources'], open(os.environ['CVD_TEST_DESTROY'], 'w'))
+"#).unwrap();
+        fs::set_permissions(&ansible, fs::Permissions::from_mode(0o755)).unwrap();
+        let inspect = bin.join("ansible-inventory");
+        fs::write(
+            &inspect,
+            "#!/bin/sh\nprintf '%s\\n' '{\"all\":{\"hosts\":[\"web\"]}}'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&inspect, fs::Permissions::from_mode(0o755)).unwrap();
+        let pytest = bin.join("pytest");
+        fs::write(
+            &pytest,
+            if mode == "spawn-error" {
+                "#!/cvd-missing-interpreter\n"
+            } else {
+                r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+sources = os.environ['ANSIBLE_INVENTORY'].split(',')
+record = {'sources': sources, 'args': sys.argv[1:], 'cwd': os.getcwd()}
+if len(sources) > 1: record['overlay'] = pathlib.Path(sources[-1]).read_text()
+with open(os.environ['CVD_TEST_CAPTURE'], 'a') as f: f.write(json.dumps(record) + '\n')
+mode = os.environ['CVD_TEST_MODE']
+sys.exit(int(mode) if mode.isdigit() else 0)
+"#
+            },
+        )
+        .unwrap();
+        fs::set_permissions(&pytest, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut paths = vec![bin];
+        paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+        let state_directory = directory.join("state");
+        let capture = directory.join("pytest.jsonl");
+        let destroy = directory.join("destroy.json");
+        let mut invocation = command(&[
+            "run",
+            "--file",
+            configuration.to_str().unwrap(),
+            "--state-dir",
+            state_directory.to_str().unwrap(),
+        ]);
+        if mode == "nested" {
+            invocation.arg("root/child");
+        }
+        if mode == "keep" {
+            invocation.arg("--keep");
+        }
+        let output = invocation
+            .env("PATH", env::join_paths(paths).unwrap())
+            .env("CVD_TEST_MODE", mode)
+            .env("CVD_TEST_CAPTURE", &capture)
+            .env("CVD_TEST_DESTROY", &destroy)
+            .env("ANSIBLE_INVENTORY", "must-be-overridden")
+            .output()
+            .unwrap();
+        let success = matches!(mode, "pass" | "keep" | "nested" | "external-only");
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state = load_state(
+            &state_directory
+                .join("runs")
+                .join(last_run_id(&state_directory))
+                .join("state.json"),
+        );
+        let path = if mode == "nested" {
+            "root/child"
+        } else {
+            "root"
+        };
+        let scenario = &state["scenarios"][path];
+        let result = &scenario["test_results"][0];
+        assert_eq!(result["status"], if success { "pass" } else { "error" });
+        if !success {
+            assert_eq!(scenario["test_results"].as_array().unwrap().len(), 1);
+            assert_eq!(state["primary_error"]["phase"], "verify");
+            assert_eq!(state["primary_error"]["scenario_path"], path);
+            assert!(result["message"].as_str().unwrap().contains("pytest"));
+        }
+        if mode != "spawn-error" {
+            let first: Value =
+                serde_json::from_str(fs::read_to_string(capture).unwrap().lines().next().unwrap())
+                    .unwrap();
+            assert_eq!(
+                first["sources"][0],
+                directory.join("inventory.yml").to_str().unwrap()
+            );
+            assert_eq!(first["cwd"], directory.to_str().unwrap());
+            if mode == "external-only" {
+                assert_eq!(first["sources"].as_array().unwrap().len(), 1);
+            } else {
+                assert_eq!(first["sources"].as_array().unwrap().len(), 2);
+                assert!(first["overlay"].as_str().unwrap().contains("runtime-web"));
+                assert_eq!(
+                    scenario["views"]["ansible_inventory"]["created"]["phase"],
+                    "verify"
+                );
+            }
+            if mode != "nested" {
+                assert_eq!(first["args"][1], "a name with spaces");
+                assert_eq!(first["args"][2], "$(not-a-shell)");
+            }
+            assert_eq!(
+                first["args"].as_array().unwrap().last().unwrap(),
+                directory.join("test_example.py").to_str().unwrap()
+            );
+        }
+        if mode == "keep" {
+            assert!(!destroy.exists());
+        } else {
+            assert!(destroy.exists());
+        }
+        if mode != "external-only" {
+            assert_eq!(
+                state["scenarios"]["root"]["resources"]["resources"][0]["exists"],
+                mode == "keep"
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

@@ -1,20 +1,37 @@
 ---
 - name: Destroy resources owned by the CVD scenario
-  hosts: localhost
+  hosts: cvd_managed
   connection: local
   gather_facts: false
   tasks:
-    - name: Remove each reported Docker container
+    - name: Remove the reported Docker container
       ansible.builtin.command:
         argv:
           - docker
           - rm
           - --force
-          - "{{ item.id }}"
-      loop: "{{ cvd.resources }}"
-      when: item.type == 'docker.container'
+          - "{{ cvd_resource.id }}"
+      when: cvd_resource.type == 'docker.container'
       register: docker_remove
       changed_when: docker_remove.rc == 0
       failed_when:
         - docker_remove.rc != 0
         - "'No such container' not in docker_remove.stderr"
+
+- name: Purge cached images after removing the containers
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Remove the recorded cached image
+      ansible.builtin.command:
+        argv: [docker, image, rm, "{{ item.id }}"]
+      loop: "{{ cvd.resources }}"
+      loop_control:
+        label: "{{ item.id }}"
+      when: item.type == 'docker.image'
+      register: image_remove
+      changed_when: image_remove.rc == 0
+      failed_when:
+        - image_remove.rc != 0
+        - "'No such image' not in image_remove.stderr"

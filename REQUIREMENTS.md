@@ -31,9 +31,10 @@ scenarios to arbitrary depth and can define any of these optional phases:
 9. `destroy`
 
 Each scenario explicitly declares the phases it enables as keys. Omitted phase
-keys are recorded as skipped. A present phase value may be null, a scalar, one
-adapter mapping, or an ordered list. Phase values are
-opaque adapter input; null and scalar values use the applicable default. Each
+keys are recorded as skipped. `verify` contains named test definitions as
+described below. Other phase values may be null, a scalar, one adapter mapping,
+or an ordered list. Those values are opaque adapter input; null and scalar
+values use the applicable default. Each
 adapter mapping contains exactly one adapter name and its input.
 
 A child scenario inherits its parent's state and resources. It can add
@@ -134,17 +135,24 @@ Children inherit the parent state and can reference parent resources.
 ### Test
 
 A **test** is a named verifier invocation. A scenario can define one or more
-tests under its `tests` mapping.
+tests directly under its `verify` mapping. Declaring those tests enables the
+verification phase; there is no separate `tests` section. Omitted `verify`
+is skipped. `verify: {}` or `verify:` enables an empty verification phase,
+which passes without invoking a verifier. Verification accepts named test
+mappings, not the opaque adapter payloads used by other lifecycle phases.
+Legacy `tests` keys and scalar/list verify payloads are rejected. This is a
+breaking configuration change within the current version-1 development schema;
+move the old `tests` mapping to `verify` and remove the old phase-only key.
 
 Provisioner, converger, and verifier defaults are declared at configuration
 top level. The current implementation supports `dummy` and `ansible`
-provisioners; an omitted provisioner defaults to `dummy`. Converger and verifier
-implementations remain dummy-only. The dummy provisioner returns one resource
+provisioners and convergers; an omitted provisioner defaults to `dummy`. The
+verifier supports `dummy` and `pytest` (including the pytest-testinfra plugin). The Ansible converger supports `prepare`,
+`converge`, and `cleanup`; real idempotence checking remains deferred. The dummy provisioner returns one resource
 with ID and type `mock`, the dummy converger performs no action, and the dummy
 verifier passes every named test by default. Dummy phase adapter input accepts `status: ok|error`.
 Dummy tests accept `status: ok|fail|error`. These controls exercise lifecycle
-result handling without external calls. Real adapters and external command
-execution are deferred.
+result handling without external calls. Other real adapters remain deferred.
 
 Child scenarios are declared in an ordered `nested` list. Each entry has a
 `name` and either an inline scenario body or an `include` path. An included file
@@ -214,6 +222,8 @@ single top-level variable is `cvd`:
   "cvd": {
     "protocol_version": 1,
     "invocation_id": "unique-per-call",
+    "input_file": "/path/to/current/input.json",
+    "result_file": "/path/to/current/result.json",
     "action": "create",
     "scenario_path": "docker-host",
     "vars": {"instance_name": "example"},
@@ -225,7 +235,7 @@ single top-level variable is `cvd`:
 For `create`, the playbook decides what to create using `cvd.vars` and its own
 project configuration. It must publish what it actually created, rather than
 echoing requested objects. It atomically writes one aggregate JSON manifest to
-the path in `CVD_RESULT_FILE`:
+the path in `cvd.result_file` (also exported as `CVD_RESULT_FILE`):
 
 ```json
 {
@@ -252,18 +262,198 @@ not the playbook, adds existence, ownership, and create/destroy provenance.
 by default when writing locally; result tasks must target the controller and
 must not enable `unsafe_writes`.
 
-For `destroy`, CVD supplies the exact persisted resources owned by the scenario
-in `cvd.resources`; these, rather than a reconstruction from `cvd.vars`, define
-what must be destroyed. A zero Ansible exit means all applicable resources were
-destroyed, after which CVD marks them destroyed. No destroy result file is
-required. A launch failure or non-zero exit is a phase error and leaves the
-resources recorded as existing.
+For `destroy`, CVD builds a dedicated inventory from existing resources owned
+by the scenario. Resources with an Ansible host binding become hosts in
+`cvd_managed`, named by their recorded `inventory_hostname`. Each host receives
+`cvd_resource`, the complete persisted resource, and defaults to a local
+connection so the playbook can call the provider on the controller. Other
+resources are supplied in `cvd.resources`. No resource is passed in both places.
 
-CVD also exports `CVD_INPUT_FILE`, `CVD_RESULT_FILE`, and
-`CVD_INVOCATION_ID`. The files are created in a per-call private directory and
+The destroy inventory replaces the original inventory: parent, sibling,
+external, destroyed, and never-created hosts are not targets. Original group
+memberships and inventory variables are not copied; use `cvd_resource.attributes`
+and the destroy phase's `cvd.vars` for deletion inputs. Normal playbook-level
+Ansible variable loading still applies. Creation continues to use the original
+inventory, where `cvd_managed` declares the hosts a host provisioner should target.
+
+Destruction must remain possible after invalid host bindings cause a consuming
+phase to fail. Duplicate names receive unique `__cvd_N` aliases during destroy;
+resources without a usable inventory name fall back to `cvd.resources`.
+Resource IDs and recorded attributes remain unchanged. Host and non-host order
+each follow the persisted manifest order.
+
+A zero Ansible exit means all applicable resources were destroyed, after which
+CVD marks them destroyed. No destroy result file is required. A launch failure
+or non-zero exit leaves the resources recorded as existing. This updates the
+initial protocol-v1 destroy input contract: host resources are no longer also
+included in `cvd.resources`.
+
+Every Ansible invocation receives `cvd.input_file`, `cvd.result_file`, and
+`cvd.invocation_id`, with identical values exported as `CVD_INPUT_FILE`,
+`CVD_RESULT_FILE`, and `CVD_INVOCATION_ID`. These fields are available in create,
+destroy, and converger playbooks. Only create must publish a result. This is an
+additive extension of protocol version 1; existing environment-based playbooks
+continue to work. The files are created in a per-call private directory and
 removed after the call. The aggregate result is initially a final-result
 contract: resources created before it is published cannot yet be recovered
 after interruption. Incremental checkpoint semantics remain deferred.
+
+## Native Ansible inventory and convergence
+
+Ansible owns inventory interpretation, including inventory plugins, groups,
+`group_vars`, `host_vars`, and variable precedence. CVD does not define an
+alternative inventory language. Optional top-level `inventory` is an ordered
+list of inventory source paths (files, directories, or scripts), resolved
+relative to the root CVD configuration:
+
+```yaml
+inventory: [inventory.yml]
+provisioner: ansible
+converger: ansible
+verifier: dummy
+```
+
+Without explicit sources, Ansible's existing configuration and environment
+select the inventory. Before appending a runtime source, CVD asks
+`ansible-config dump --format json` for `DEFAULT_HOST_LIST` so the added source
+does not replace configured inventory. Original source locations are retained;
+CVD does not copy or flatten them, preserving adjacent variable-file discovery.
+
+A reusable create playbook can target `cvd_managed` with `connection: local`
+and `gather_facts: false`. Host provisioning playbooks target this group by
+convention during create.
+CVD rebuilds it from recorded ownership during destroy; original membership
+alone never establishes ownership.
+Normal inventory host/group variables supply adapter-specific creation input;
+`cvd.vars` remains available for arbitrary, non-host provisioning input.
+Hosts outside the playbook's creation targets are used as declared, without
+CVD taking lifecycle ownership of them. Convergence can still modify them.
+
+### Runtime host binding
+
+A reported resource can optionally bind to an existing inventory host:
+
+```yaml
+id: actual-provider-id
+type: docker.container
+attributes:
+  ansible:
+    inventory_hostname: web
+    vars:
+      ansible_host: actual-container-id
+      ansible_connection: community.docker.docker
+```
+
+`inventory_hostname` is a nonempty string; `vars` is an optional mapping,
+defaulting to empty. These are the only binding fields. Resource identity and
+ownership remain independent of inventory identity. Resources without this
+binding, such as networks or volumes, do not enter the generated inventory.
+The create playbook reports the actual object's ID and connection data, not
+just a copy of its requested definition. The existing aggregate manifest
+protocol also applies to bindings; a reporting helper is not required.
+
+Before each Ansible `prepare`, `converge`, or `cleanup` invocation, and before
+each pytest test in `verify`, CVD generates
+a private YAML inventory overlay from existing resources owned by that scenario
+and its ancestors. Unrelated siblings and destroyed resources are excluded.
+Ancestor resources precede child resources and each manifest's order is
+preserved. Multiple visible resources binding the same host, or malformed
+bindings, produce an error in the consuming phase. Resources are already
+persisted at that point, so normal cleanup and destruction can still proceed.
+
+CVD validates reported inventory host names against the original sources using
+`ansible-inventory --list` with the consuming playbook's directory. Unknown
+names are errors, rather than silently creating new inventory hosts. CVD cannot
+infer that a playbook failed to report an intended host solely from group
+membership: the create playbook is responsible for a complete manifest.
+
+Ansible loads original sources first and the overlay last. The overlay contains
+only host variables; group membership and group variables stay in the original
+inventory. Ordinary Ansible precedence applies: a later inventory source does
+not override higher-precedence variable sources such as extra vars.
+
+Create uses the original inventory and reports runtime data. Destroy uses its
+dedicated owned-host inventory and non-host resource list, regardless of
+current group membership. The overlay is shared by inventory-consuming converger phases and pytest
+verification. Ansible playbook verification and idempotence are not yet
+implemented.
+
+Ansible converger phases require explicit `ansible: {playbook: ..., vars: ...}`
+mappings, with the same path and `cvd` extra-vars conventions as the provisioner.
+`cvd.action` names the phase and `cvd.resources` is empty for convergence;
+runtime host data comes through inventory. No result manifest is required:
+a nonzero exit or launch failure is a phase error. Explicit `dummy` mappings
+can override the top-level converger. Lists containing Ansible actions are
+rejected until ordered real-adapter lists are implemented.
+
+Generated overlays are persisted under the run's `views` directory and recorded
+as view resources under `scenarios[PATH].views.ansible_inventory`, with their
+file path in `attributes.path`. They are separate from provisioner-owned
+resources and do not affect create/destroy counts. The file records the latest
+rendered view for that scenario; destruction does not erase that historical
+artifact. Source inventory files remain user-owned and are not snapshotted.
+
+Resource masking is not yet implemented. Excluding a resource from an overlay
+would not remove its host from original inventory sources; execution selection
+for masked hosts requires a separate design before masking is implemented.
+
+## Pytest verifier
+
+`verifier: pytest` selects pytest for named tests; a test can override the
+top-level default with its own `verifier`. Testinfra uses this same adapter
+through the installed `pytest-testinfra` plugin:
+
+```yaml
+verifier: pytest
+scenarios:
+  default:
+    verify:
+      web:
+        pytest:
+          path: tests/test_web.py
+          args: ["-q"]
+```
+
+A testinfra module can select its inventory group directly:
+
+```python
+testinfra_hosts = ["ansible://webservers"]
+```
+
+Each pytest test requires `pytest.path`, a file or directory resolved relative
+to the file containing its scenario. It must exist at configuration load time.
+Optional `pytest.args` is an ordered string list passed literally, without a
+shell. CVD runs `pytest ARGS PATH` from the root configuration directory using
+`pytest` from the current `PATH`, so an activated virtual environment works.
+The test's verifier must be `pytest` to accept pytest options; dummy status
+controls do not configure pytest results. No testinfra flags or host selection
+are injected automatically; ordinary pytest tests are also supported.
+
+CVD sets `ANSIBLE_INVENTORY` for each pytest process to the comma-separated
+original inventory sources followed by the scenario's runtime overlay, if any.
+Ansible defaults are resolved through `ansible-config` when explicit sources
+are absent. Original sources remain at their own paths, retaining group and
+host variable files. Testinfra's `ansible://` backend consumes this environment
+variable through Ansible; tests need no inventory CLI argument. Inventory
+source paths containing commas are rejected because this environment variable
+cannot represent them unambiguously. The parent process environment is not
+modified. Pytest users need Ansible installed when resolving its configured
+inventory defaults or validating runtime bindings; testinfra is required only
+for tests using its fixtures/backend.
+
+The overlay is freshly derived before verification, including when converge
+was omitted and when a selected child inherits parent resources. Its path is
+persisted as a view before launching pytest. External inventory hosts remain
+available without becoming provisioner-owned resources.
+
+For this initial adapter, exit zero is `pass`; **every nonzero pytest exit is
+`error`**, including assertion failures, collection/internal errors, interruption,
+and no tests collected. Launch and inventory-preparation errors are also
+`error`. CVD records the named test result and error message with scenario and
+`verify` provenance, stops later tests/children, and attempts normal cleanup
+and destruction. `--keep` retains its existing destruction-suppression behavior.
+Distinguishing pytest assertion failures as `fail` is deferred. This is an
+explicit temporary exception to the general verifier result classification.
 
 ## Execution and selection
 
@@ -400,7 +590,7 @@ These choices require focused design work before implementation:
 
 - configuration file syntax and schema;
 - provisioner process protocol, manifest schema, and protocol versioning;
-- resource-to-Ansible-inventory mapping and merge rules;
+- Ansible inventory execution selection for masked resources and richer view overrides;
 - persistence layout and secret handling;
 - exact safe-phase and rerun rules after interrupted executions;
 - plugin discovery and distribution; and

@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod converger;
+mod inventory;
 mod lifecycle;
 mod provisioner;
 mod state;
@@ -22,11 +23,11 @@ use thiserror::Error;
 use crate::{
     cli::{Cli, Command, RunArgs, StateReportArgs, StateResourcesArgs, StateViewArgs, ViewFormat},
     config::Config,
-    converger::DummyConverger,
+    converger::AnsibleConverger,
     lifecycle::{LifecycleError, LifecycleRunner, render_state_report},
     provisioner::AnsibleProvisioner,
     state::{RunState, StateError, StateRepository, StateRepositoryError, default_state_directory},
-    verifier::DummyVerifier,
+    verifier::PytestVerifier,
 };
 
 #[derive(Debug, Error)]
@@ -115,9 +116,21 @@ fn run(args: RunArgs) -> Result<(), AppError> {
         .parent()
         .expect("canonical configuration path has a parent");
     let provisioner =
-        AnsibleProvisioner::new(configuration.provisioner == "ansible", working_directory);
-    let converger = DummyConverger;
-    let verifier = DummyVerifier;
+        AnsibleProvisioner::new(configuration.provisioner == "ansible", working_directory)
+            .with_inventory(configuration.inventory.clone());
+    let converger = AnsibleConverger {
+        runtime: AnsibleProvisioner::new(false, working_directory)
+            .with_inventory(configuration.inventory.clone()),
+        default_is_ansible: configuration.converger == "ansible",
+    };
+    let verifier = PytestVerifier {
+        default_is_pytest: configuration.verifier == "pytest",
+        working_directory: working_directory.to_owned(),
+        inventory: inventory::AnsibleInventory::new(
+            working_directory,
+            configuration.inventory.clone(),
+        ),
+    };
     let output = io::stdout();
     let styled_output =
         terminal_styling_enabled(output.is_terminal(), std::env::var_os("NO_COLOR").is_some());

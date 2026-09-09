@@ -1,0 +1,9 @@
+---
+- name: Configure the web containers through the runtime inventory
+  hosts: webservers
+  gather_facts: false
+  tasks:
+    - name: Hello world
+      # no python in the image
+      ansible.builtin.raw: "printf '%s\\n' {{ greeting | quote }} > /tmp/cvd-greeting"
+      changed_when: true

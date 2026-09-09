@@ -3,20 +3,25 @@ inventory: [inventory.yml]
 provisioner: ansible
 converger: ansible
 verifier: pytest
-
 scenarios:
-  scenario_id_1:
+  native:
     create:
       ansible:
         playbook: create.yml
+    prepare:
+      ansible:
+        playbook: converge.yml
     converge:
       ansible:
         playbook: converge.yml
     verify:
-      greeting:
+      inventory:
         pytest:
-          path: tests/test_web.py
+          path: test_inventory.py
           args: ["-q"]
+    cleanup:
+      ansible:
+        playbook: converge.yml
     destroy:
       ansible:
         playbook: destroy.yml

@@ -4,7 +4,7 @@ use crate::{
     config::{DummyStatus, PhaseDefinition},
     state::LifecyclePhase,
 };
-use std::io::Write;
+use std::{io::Write, path::Path};
 use thiserror::Error;
 
 pub trait Converger {
@@ -13,6 +13,7 @@ pub trait Converger {
         scenario_path: &str,
         phase: LifecyclePhase,
         definition: &PhaseDefinition,
+        inventory: Option<&Path>,
         output: &mut dyn Write,
         styled_output: bool,
     ) -> Result<(), ConvergerError>;
@@ -28,6 +29,7 @@ impl Converger for DummyConverger {
         scenario_path: &str,
         phase: LifecyclePhase,
         definition: &PhaseDefinition,
+        _inventory: Option<&Path>,
         _output: &mut dyn Write,
         _styled_output: bool,
     ) -> Result<(), ConvergerError> {
@@ -44,3 +46,50 @@ impl Converger for DummyConverger {
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct ConvergerError(pub String);
+
+/// Ansible converger with explicit dummy overrides.
+pub struct AnsibleConverger {
+    pub runtime: crate::provisioner::AnsibleProvisioner,
+    pub default_is_ansible: bool,
+}
+
+impl Converger for AnsibleConverger {
+    fn run(
+        &self,
+        scenario_path: &str,
+        phase: LifecyclePhase,
+        definition: &PhaseDefinition,
+        inventory: Option<&Path>,
+        output: &mut dyn Write,
+        styled_output: bool,
+    ) -> Result<(), ConvergerError> {
+        if let Some(ansible) = definition.ansible() {
+            let action = match phase {
+                LifecyclePhase::Prepare => "prepare",
+                LifecyclePhase::Converge => "converge",
+                LifecyclePhase::Cleanup => "cleanup",
+                _ => {
+                    return Err(ConvergerError(
+                        "unsupported Ansible converger phase".to_owned(),
+                    ));
+                }
+            };
+            self.runtime
+                .converge(scenario_path, action, ansible, inventory)
+                .map_err(|error| ConvergerError(error.to_string()))
+        } else if self.default_is_ansible && !definition.is_dummy_override() {
+            Err(ConvergerError(
+                "the Ansible converger requires an explicit `ansible` phase mapping".to_owned(),
+            ))
+        } else {
+            DummyConverger.run(
+                scenario_path,
+                phase,
+                definition,
+                inventory,
+                output,
+                styled_output,
+            )
+        }
+    }
+}

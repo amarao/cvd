@@ -9,6 +9,10 @@ remaining agnostic about how infrastructure is created.
 Read `REQUIREMENTS.md` before proposing architecture or implementation work. It
 is the current product source of truth.
 
+`docs/provisioner.md` is the user-facing guide for writing Ansible provisioner
+playbooks. Keep it aligned with changes to the provisioner contract, supplied
+variables, and result protocol.
+
 For the current dummy stub, also follow `dummy.md` and `state.md`. They are an
 implementation plan and state-storage notes; `REQUIREMENTS.md` takes precedence
 if they conflict.

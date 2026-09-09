@@ -86,14 +86,40 @@ impl Provisioner for DummyProvisioner {
 pub struct AnsibleProvisioner {
     default_is_ansible: bool,
     working_directory: PathBuf,
+    inventory: crate::inventory::AnsibleInventory,
 }
 
 impl AnsibleProvisioner {
     pub fn new(default_is_ansible: bool, working_directory: impl Into<PathBuf>) -> Self {
+        let working_directory = working_directory.into();
         Self {
             default_is_ansible,
-            working_directory: working_directory.into(),
+            inventory: crate::inventory::AnsibleInventory::new(&working_directory, Vec::new()),
+            working_directory,
         }
+    }
+
+    pub fn with_inventory(mut self, inventory: Vec<PathBuf>) -> Self {
+        self.inventory =
+            crate::inventory::AnsibleInventory::new(&self.working_directory, inventory);
+        self
+    }
+
+    pub(crate) fn converge(
+        &self,
+        scenario_path: &str,
+        action: &'static str,
+        definition: &crate::config::AnsiblePhaseDefinition,
+        overlay: Option<&std::path::Path>,
+    ) -> Result<(), ProvisionerError> {
+        self.inventory
+            .validate_bindings(
+                overlay,
+                definition.playbook.parent().expect("resolved playbook"),
+            )
+            .map_err(|error| ProvisionerError(error.to_string()))?;
+        self.run(scenario_path, action, &[], definition, false, overlay)
+            .map(|_| ())
     }
 
     fn selected<'a>(
@@ -111,17 +137,26 @@ impl AnsibleProvisioner {
 
     fn run(
         &self,
-        action: &'static str,
         scenario_path: &str,
+        action: &'static str,
         resources: &[Resource],
         definition: &crate::config::AnsiblePhaseDefinition,
         expect_result: bool,
+        overlay: Option<&std::path::Path>,
     ) -> Result<Option<CreateResult>, ProvisionerError> {
         let exchange = Exchange::create()?;
+        let (destroy_inventory, other_resources) = destroy_targets(scenario_path, resources);
+        let resources = if action == "destroy" {
+            other_resources.as_slice()
+        } else {
+            resources
+        };
         let input = AnsibleInput {
             cvd: CvdInput {
                 protocol_version: PROTOCOL_VERSION,
                 invocation_id: &exchange.invocation_id,
+                input_file: &exchange.input,
+                result_file: &exchange.result,
                 action,
                 scenario_path,
                 vars: &definition.vars,
@@ -136,7 +171,19 @@ impl AnsibleProvisioner {
         )
         .map_err(|error| ProvisionerError(format!("cannot write Ansible input: {error}")))?;
 
-        let status = Command::new("ansible-playbook")
+        let mut command = Command::new("ansible-playbook");
+        if action == "destroy" {
+            let path = exchange.directory.join("destroy-inventory.yml");
+            let data = serde_yaml::to_string(&destroy_inventory)
+                .map_err(|error| ProvisionerError(error.to_string()))?;
+            fs::write(&path, data).map_err(|error| ProvisionerError(error.to_string()))?;
+            command.arg("--inventory").arg(path);
+        } else {
+            self.inventory
+                .apply(&mut command, overlay)
+                .map_err(|error| ProvisionerError(error.to_string()))?;
+        }
+        let status = command
             .arg(&definition.playbook)
             .arg("--extra-vars")
             .arg(format!("@{}", exchange.input.display()))
@@ -198,7 +245,7 @@ impl Provisioner for AnsibleProvisioner {
             return DummyProvisioner.create(scenario_path, definition);
         };
         let result = self
-            .run("create", scenario_path, &[], ansible, true)?
+            .run(scenario_path, "create", &[], ansible, true, None)?
             .expect("create requests a result");
         let mut ids = BTreeSet::new();
         let resources = result
@@ -248,11 +295,12 @@ impl Provisioner for AnsibleProvisioner {
             return DummyProvisioner.destroy(scenario_path, resources, definition);
         };
         self.run(
-            "destroy",
             scenario_path,
+            "destroy",
             &resources.resources,
             ansible,
             false,
+            None,
         )?;
         Ok(())
     }
@@ -267,6 +315,8 @@ struct AnsibleInput<'a> {
 struct CvdInput<'a> {
     protocol_version: u32,
     invocation_id: &'a str,
+    input_file: &'a std::path::Path,
+    result_file: &'a std::path::Path,
     action: &'static str,
     scenario_path: &'a str,
     vars: &'a serde_json::Value,
@@ -335,3 +385,127 @@ impl Drop for Exchange {
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct ProvisionerError(pub String);
+
+/// Destruction targets come exclusively from persisted ownership, never the
+/// original inventory (which can contain uncreated or inherited hosts).
+fn destroy_targets(scenario: &str, resources: &[Resource]) -> (serde_json::Value, Vec<Resource>) {
+    let mut hosts = serde_json::Map::new();
+    let mut others = Vec::new();
+    for resource in resources
+        .iter()
+        .filter(|r| r.exists && r.created.scenario_path == scenario)
+    {
+        let name = resource
+            .attributes
+            .get("ansible")
+            .and_then(|binding| binding.get("inventory_hostname"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.trim().is_empty());
+        if let Some(name) = name {
+            let mut alias = name.to_owned();
+            let mut suffix = 2;
+            while hosts.contains_key(&alias) {
+                alias = format!("{name}__cvd_{suffix}");
+                suffix += 1;
+            }
+            hosts.insert(
+                alias,
+                serde_json::json!({"ansible_connection": "local", "cvd_resource": resource}),
+            );
+        } else {
+            others.push(resource.clone());
+        }
+    }
+    (
+        serde_json::json!({"all": {"children": {"cvd_managed": {"hosts": hosts}}}}),
+        others,
+    )
+}
+
+#[cfg(test)]
+mod destroy_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn resource(id: &str, name: Option<&str>) -> Resource {
+        Resource {
+            id: id.into(),
+            resource_type: "test".into(),
+            exists: true,
+            created: ResourceLocation {
+                scenario_path: "root/child".into(),
+                phase: LifecyclePhase::Create,
+            },
+            destroyed: None,
+            attributes: name
+                .map(|name| {
+                    BTreeMap::from([(
+                        "ansible".into(),
+                        json!({"inventory_hostname": name, "vars": {"ansible_connection": "ssh"}}),
+                    )])
+                })
+                .unwrap_or_default(),
+            relationships: BTreeSet::new(),
+            sensitive_attributes: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn destroy_separates_owned_hosts_from_other_resources_in_order() {
+        let mut parent = resource("parent", Some("parent"));
+        parent.created.scenario_path = "root".into();
+        let mut deleted = resource("deleted", Some("deleted"));
+        deleted.exists = false;
+        let resources = vec![
+            parent,
+            resource("id-z", Some("z")),
+            resource("network", None),
+            resource("id-a", Some("a")),
+            deleted,
+        ];
+        let (inventory, others) = destroy_targets("root/child", &resources);
+        let hosts = inventory["all"]["children"]["cvd_managed"]["hosts"]
+            .as_object()
+            .unwrap();
+        assert_eq!(
+            hosts.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["z", "a"]
+        );
+        assert_eq!(hosts["z"]["cvd_resource"], json!(resources[1]));
+        assert_eq!(hosts["z"]["ansible_connection"], "local");
+        assert_eq!(others, vec![resources[2].clone()]);
+        let (empty, others) = destroy_targets("unrelated", &resources);
+        assert!(
+            empty["all"]["children"]["cvd_managed"]["hosts"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(others.is_empty());
+    }
+
+    #[test]
+    fn invalid_host_bindings_do_not_lose_resources_during_cleanup() {
+        let mut malformed = resource("malformed", None);
+        malformed.attributes.insert("ansible".into(), json!(null));
+        let resources = vec![
+            resource("one", Some("web")),
+            resource("two", Some("web")),
+            resource("three", Some("web__cvd_2")),
+            malformed,
+        ];
+        let (inventory, others) = destroy_targets("root/child", &resources);
+        let hosts = inventory["all"]["children"]["cvd_managed"]["hosts"]
+            .as_object()
+            .unwrap();
+        assert_eq!(hosts.len(), 3);
+        assert_eq!(
+            hosts
+                .values()
+                .map(|host| host["cvd_resource"]["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["one", "two", "three"]
+        );
+        assert_eq!(others[0].id, "malformed");
+    }
+}

@@ -1,3 +1,5 @@
 /target
 /.cvd
 **/.cvd/
+**/__pycache__/
+**/.pytest_cache/

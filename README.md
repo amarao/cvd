@@ -8,3 +8,6 @@ I know what I want, but llm will write, under tight supervision and
 good test coverage.
 
 If it will work out, I will announce, if not, I will archive.
+
+See [Writing an Ansible provisioner](docs/provisioner.md) for the playbook
+contract, supplied variables, and create/destroy protocol.

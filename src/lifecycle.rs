@@ -251,7 +251,29 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         }
 
         for (test_name, test) in scenario.tests.iter() {
-            match self.verifier.verify(path, test_name, test) {
+            let inventory = if test.pytest.is_some() {
+                crate::inventory::write_view(
+                    &mut self.state,
+                    path,
+                    LifecyclePhase::Verify,
+                    self.store.path(),
+                )
+                .and_then(|inventory| {
+                    self.store
+                        .save(&self.state)
+                        .map(|_| inventory)
+                        .map_err(|error| format!("cannot persist inventory view: {error}"))
+                })
+            } else {
+                Ok(None)
+            };
+            let result = match inventory {
+                Ok(inventory) => self
+                    .verifier
+                    .verify(path, test_name, test, inventory.as_deref()),
+                Err(error) => Err(crate::verifier::VerifierError(error)),
+            };
+            match result {
                 Ok(status) => {
                     let verifier_error = status == VerifierStatus::Error;
                     if status == VerifierStatus::Fail {
@@ -279,6 +301,15 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
                     }
                 }
                 Err(error) => {
+                    self.state.record_test_result(
+                        path,
+                        TestResult {
+                            name: test_name.clone(),
+                            status: VerifierStatus::Error,
+                            message: Some(error.to_string()),
+                            recorded_at: timestamp(),
+                        },
+                    );
                     self.execution_error(path, LifecyclePhase::Verify, error.to_string());
                     return true;
                 }
@@ -359,10 +390,37 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         let definition = scenario
             .phase(configured_phase(&phase))
             .expect("enabled converger phases have a definition");
+        let inventory = if definition.ansible().is_some() {
+            match crate::inventory::write_view(
+                &mut self.state,
+                path,
+                phase.clone(),
+                self.store.path(),
+            ) {
+                Ok(inventory) => {
+                    if let Err(error) = self.store.save(&self.state) {
+                        self.execution_error(
+                            path,
+                            phase,
+                            format!("cannot persist inventory view: {error}"),
+                        );
+                        return true;
+                    }
+                    inventory
+                }
+                Err(error) => {
+                    self.execution_error(path, phase, error);
+                    return true;
+                }
+            }
+        } else {
+            None
+        };
         match self.converger.run(
             path,
             phase.clone(),
             definition,
+            inventory.as_deref(),
             &mut self.output,
             self.styled_output,
         ) {
@@ -799,18 +857,16 @@ scenarios:
     create:
     prepare:
     converge:
-    verify:
     cleanup:
     destroy:
-    tests:
+    verify:
       smoke: {}
     nested:
       - name: restart
         create:
         converge:
-        verify:
         destroy:
-        tests:
+        verify:
           after-restart: {}
         nested:
           - name: deep
@@ -974,8 +1030,7 @@ provisioner: dummy
 converger: dummy
 verifier: dummy
 scenarios:
-  empty:
-    tests: {}
+  empty: {}
 "#,
         )
         .unwrap();
@@ -1099,6 +1154,7 @@ scenarios:
             _scenario_path: &str,
             _test_name: &str,
             _: &crate::config::Test,
+            _: Option<&std::path::Path>,
         ) -> Result<VerifierStatus, crate::verifier::VerifierError> {
             Ok(VerifierStatus::Error)
         }

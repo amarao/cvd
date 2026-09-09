@@ -16,6 +16,8 @@ pub const CONFIG_VERSION: u32 = 1;
 struct RawConfig {
     version: u32,
     #[serde(default)]
+    inventory: Vec<PathBuf>,
+    #[serde(default)]
     provisioner: Option<String>,
     converger: String,
     verifier: String,
@@ -24,6 +26,7 @@ struct RawConfig {
 
 #[derive(Debug)]
 pub struct Config {
+    pub inventory: Vec<PathBuf>,
     pub provisioner: String,
     pub converger: String,
     pub verifier: String,
@@ -60,6 +63,12 @@ pub(crate) struct PhaseDefinition {
 }
 
 impl PhaseDefinition {
+    pub(crate) fn is_dummy_override(&self) -> bool {
+        self._value.as_mapping().is_some_and(|mapping| {
+            mapping.contains_key(serde_yaml::Value::String("dummy".to_owned()))
+        })
+    }
+
     pub(crate) fn dummy_status(&self) -> DummyStatus {
         let serde_yaml::Value::Mapping(action) = &self._value else {
             return DummyStatus::Ok;
@@ -126,9 +135,19 @@ pub enum ConfiguredPhase {
 #[serde(deny_unknown_fields)]
 pub struct Test {
     #[serde(default)]
+    pub(crate) pytest: Option<PytestDefinition>,
+    #[serde(default)]
     pub verifier: Option<String>,
     #[serde(default)]
     pub(crate) status: DummyStatus,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PytestDefinition {
+    pub(crate) path: PathBuf,
+    #[serde(default)]
+    pub(crate) args: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -173,8 +192,6 @@ struct RawScenario {
     #[serde(default)]
     destroy: AbsentOrValue,
     #[serde(default)]
-    tests: NamedMap<Test>,
-    #[serde(default)]
     nested: Vec<RawNestedScenario>,
 }
 
@@ -201,8 +218,6 @@ struct RawNestedScenario {
     #[serde(default)]
     destroy: AbsentOrValue,
     #[serde(default)]
-    tests: NamedMap<Test>,
-    #[serde(default)]
     nested: Vec<RawNestedScenario>,
 }
 
@@ -217,7 +232,6 @@ impl RawNestedScenario {
             verify: self.verify,
             cleanup: self.cleanup,
             destroy: self.destroy,
-            tests: self.tests,
             nested: self.nested,
         }
     }
@@ -231,7 +245,6 @@ impl RawNestedScenario {
             || self.verify.is_present()
             || self.cleanup.is_present()
             || self.destroy.is_present()
-            || !self.tests.0.is_empty()
             || !self.nested.is_empty()
     }
 }
@@ -323,7 +336,7 @@ pub enum ConfigError {
     },
     #[error("included scenario cycle at `{0}`")]
     IncludeCycle(PathBuf),
-    #[error("scenario include `{path}` cannot be combined with inline phases, tests, or children")]
+    #[error("scenario include `{path}` cannot be combined with inline phases or children")]
     IncludeWithInlineContent { path: String },
     #[error("invalid scenario `{scenario}` {phase} phase: {reason}")]
     InvalidPhase {
@@ -357,7 +370,19 @@ impl Config {
             &mut source_material,
             None,
         )?;
+        let inventory = raw
+            .inventory
+            .into_iter()
+            .map(|source| {
+                let path = base.unwrap_or_else(|| Path::new(".")).join(source);
+                fs::canonicalize(&path).map_err(|error| ConfigError::InvalidDefault {
+                    kind: "inventory",
+                    reason: format!("cannot resolve `{}`: {error}", path.display()),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let config = Self {
+            inventory,
             provisioner: raw.provisioner.unwrap_or_else(|| "dummy".to_owned()),
             converger: raw.converger,
             verifier: raw.verifier,
@@ -402,8 +427,8 @@ impl Config {
 
     fn validate(&self) -> Result<(), ConfigError> {
         validate_default("provisioner", &self.provisioner, &["dummy", "ansible"])?;
-        validate_default("converger", &self.converger, &["dummy"])?;
-        validate_default("verifier", &self.verifier, &["dummy"])?;
+        validate_default("converger", &self.converger, &["dummy", "ansible"])?;
+        validate_default("verifier", &self.verifier, &["dummy", "pytest"])?;
         validate_scenarios(self, &self.scenarios, None)
     }
 }
@@ -455,17 +480,33 @@ fn resolve_scenario(
         verify,
         cleanup,
         destroy,
-        tests,
         nested,
     } = raw;
     let mut phases = BTreeMap::new();
+    let mut tests = NamedMap::<Test>::default();
+    if let Some(value) = verify.0 {
+        if !value.is_null() {
+            tests = serde_yaml::from_value(value).map_err(|error| ConfigError::InvalidPhase {
+                scenario: path.to_owned(),
+                phase: "verify",
+                reason: format!("verify must be a mapping of named tests: {error}"),
+            })?;
+        }
+        phases.insert(
+            ConfiguredPhase::Verify,
+            PhaseDefinition {
+                _value: serde_yaml::Value::Null,
+                ansible: None,
+            },
+        );
+    }
+
     for (phase, value) in [
         (ConfiguredPhase::Dependency, dependency),
         (ConfiguredPhase::Create, create),
         (ConfiguredPhase::Prepare, prepare),
         (ConfiguredPhase::Converge, converge),
         (ConfiguredPhase::Idempotence, idempotence),
-        (ConfiguredPhase::Verify, verify),
         (ConfiguredPhase::Cleanup, cleanup),
         (ConfiguredPhase::Destroy, destroy),
     ] {
@@ -548,6 +589,21 @@ fn resolve_scenario(
         child_scenarios.insert(name, resolved);
     }
 
+    for (name, test) in &mut tests.0 {
+        if let Some(pytest) = &mut test.pytest {
+            if pytest.path.as_os_str().is_empty() {
+                return Err(ConfigError::InvalidTest {
+                    path: format!("{path}::{name}"),
+                    reason: "pytest path must not be empty".to_owned(),
+                });
+            }
+            let target = base.unwrap_or_else(|| Path::new(".")).join(&pytest.path);
+            pytest.path = fs::canonicalize(&target).map_err(|error| ConfigError::InvalidTest {
+                path: format!("{path}::{name}"),
+                reason: format!("cannot resolve pytest path `{}`: {error}", target.display()),
+            })?;
+        }
+    }
     Ok(Scenario {
         phases,
         tests: TestMap(tests.0),
@@ -582,10 +638,24 @@ fn validate_scenarios(
                 reason,
             })?;
             let verifier = test.verifier.as_deref().unwrap_or(&config.verifier);
-            if verifier != "dummy" {
+            let reason = match verifier {
+                "dummy" if test.pytest.is_some() => {
+                    Some("pytest options require the pytest verifier".to_owned())
+                }
+                "dummy" => None,
+                "pytest" if test.pytest.is_none() => {
+                    Some("pytest verifier requires `pytest: {path: ...}`".to_owned())
+                }
+                "pytest" if test.status != DummyStatus::Ok => {
+                    Some("dummy status controls cannot be used with pytest".to_owned())
+                }
+                "pytest" => None,
+                _ => Some(format!("unsupported implementation `{verifier}`")),
+            };
+            if let Some(reason) = reason {
                 return Err(ConfigError::InvalidTest {
                     path: test_path,
-                    reason: format!("unsupported implementation `{verifier}`"),
+                    reason,
                 });
             }
         }
@@ -618,6 +688,11 @@ fn validate_phase_value(value: &serde_yaml::Value, phase: ConfiguredPhase) -> Re
                     let serde_yaml::Value::Mapping(mapping) = action else {
                         unreachable!("all list items were checked as mappings");
                     };
+                    if mapping.contains_key(serde_yaml::Value::String("ansible".to_owned())) {
+                        return Err(
+                            "Ansible phases require one adapter mapping, not a list".to_owned()
+                        );
+                    }
                     validate_action_mapping(mapping, phase)?;
                 }
             }
@@ -646,11 +721,25 @@ fn validate_action_mapping(
                 return Err("dummy phase status must be `ok` or `error`".to_owned());
             }
         }
-        "ansible" if matches!(phase, ConfiguredPhase::Create | ConfiguredPhase::Destroy) => {
+        "ansible"
+            if matches!(
+                phase,
+                ConfiguredPhase::Create
+                    | ConfiguredPhase::Destroy
+                    | ConfiguredPhase::Prepare
+                    | ConfiguredPhase::Converge
+                    | ConfiguredPhase::Cleanup
+            ) =>
+        {
             let _: RawAnsibleOptions = serde_yaml::from_value(options.clone())
                 .map_err(|error| format!("invalid Ansible options: {error}"))?;
         }
-        "ansible" => return Err("Ansible is supported only for create and destroy".to_owned()),
+        "ansible" => {
+            return Err(
+                "Ansible is supported only for create, prepare, converge, cleanup, and destroy"
+                    .to_owned(),
+            );
+        }
         _ => return Err(format!("unsupported implementation `{adapter}`")),
     }
     Ok(())
@@ -675,8 +764,18 @@ fn resolve_ansible_options(
     let Some(options) = mapping.get(&key) else {
         return Ok(None);
     };
-    if !matches!(phase, ConfiguredPhase::Create | ConfiguredPhase::Destroy) {
-        return Err("Ansible is supported only for create and destroy".to_owned());
+    if !matches!(
+        phase,
+        ConfiguredPhase::Create
+            | ConfiguredPhase::Destroy
+            | ConfiguredPhase::Prepare
+            | ConfiguredPhase::Converge
+            | ConfiguredPhase::Cleanup
+    ) {
+        return Err(
+            "Ansible is supported only for create, prepare, converge, cleanup, and destroy"
+                .to_owned(),
+        );
     }
     let raw: RawAnsibleOptions = serde_yaml::from_value(options.clone())
         .map_err(|error| format!("invalid Ansible options: {error}"))?;
@@ -737,10 +836,9 @@ scenarios:
     prepare:
       - dummy:
     converge: site.yml
-    verify:
     cleanup:
     destroy:
-    tests:
+    verify:
       smoke: {}
     nested:
       - name: restart
@@ -833,6 +931,110 @@ scenarios:
         assert!(scenario.has_phase(ConfiguredPhase::Create));
         assert!(scenario.has_phase(ConfiguredPhase::Destroy));
         assert!(scenario.scenarios.iter().next().is_none());
+    }
+
+    #[test]
+    fn docker_example_resolves_native_inventory_and_converger() {
+        let path = fs::canonicalize("examples/ansible-docker/cvd.yml").unwrap();
+        let yaml = fs::read_to_string(&path).unwrap();
+        let config = Config::from_yaml_at(&yaml, &path).unwrap();
+        assert_eq!(config.converger, "ansible");
+        assert_eq!(
+            config.inventory,
+            vec![fs::canonicalize("examples/ansible-docker/inventory.yml").unwrap()]
+        );
+        assert!(
+            config
+                .scenarios
+                .iter()
+                .next()
+                .unwrap()
+                .1
+                .phase(ConfiguredPhase::Converge)
+                .unwrap()
+                .ansible()
+                .is_some()
+        );
+        let missing = yaml.replace("inventory.yml", "missing-inventory.yml");
+        assert!(matches!(
+            Config::from_yaml_at(&missing, &path),
+            Err(ConfigError::InvalidDefault {
+                kind: "inventory",
+                ..
+            })
+        ));
+        for phase in ["prepare", "cleanup"] {
+            let yaml = yaml.replace("    converge:", &format!("    {phase}:"));
+            Config::from_yaml_at(&yaml, &path).unwrap();
+        }
+        for phase in ["verify", "idempotence", "dependency"] {
+            let yaml = yaml
+                .replace("    verify:\n", "")
+                .replace("    converge:", &format!("    {phase}:"));
+            assert!(matches!(
+                Config::from_yaml_at(&yaml, &path),
+                Err(ConfigError::InvalidPhase { .. })
+            ));
+        }
+        let list = yaml.replace(
+            "    converge:\n      ansible:\n        playbook: converge.yml",
+            "    converge:\n      - ansible:\n          playbook: converge.yml",
+        );
+        assert!(matches!(
+            Config::from_yaml_at(&list, &path),
+            Err(ConfigError::InvalidPhase { .. })
+        ));
+    }
+
+    #[test]
+    fn pytest_paths_follow_included_scenarios_and_validate_adapter_options() {
+        let directory =
+            std::env::temp_dir().join(format!("cvd-pytest-config-{}", std::process::id()));
+        let child = directory.join("nested");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("test_host.py"), "def test_host(): pass\n").unwrap();
+        let fragment = "verify:\n  host:\n    verifier: pytest\n    pytest:\n      path: test_host.py\n      args: ['-k', 'a name']\n";
+        fs::write(child.join("scenario.yml"), fragment).unwrap();
+        let yaml = "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  root:\n    nested:\n      - name: child\n        include: nested/scenario.yml\n";
+        let root = directory.join("cvd.yml");
+        let config = Config::from_yaml_at(yaml, &root).unwrap();
+        let (_, test) = config
+            .scenario("root/child")
+            .unwrap()
+            .tests
+            .iter()
+            .next()
+            .unwrap();
+        let pytest = test.pytest.as_ref().unwrap();
+        assert_eq!(
+            pytest.path,
+            fs::canonicalize(child.join("test_host.py")).unwrap()
+        );
+        assert_eq!(pytest.args, ["-k", "a name"]);
+        for bad in [
+            fragment.replace("test_host.py", "absent.py"),
+            fragment.replace("test_host.py", "''"),
+            fragment.replace("    verifier: pytest", "    verifier: dummy"),
+            fragment.replace(
+                "    pytest:\n      path: test_host.py\n      args: ['-k', 'a name']\n",
+                "",
+            ),
+            fragment.replace(
+                "    verifier: pytest",
+                "    verifier: pytest\n    status: fail",
+            ),
+            fragment.replace("args: ['-k', 'a name']", "args: '-k name'"),
+        ] {
+            fs::write(child.join("scenario.yml"), bad).unwrap();
+            assert!(Config::from_yaml_at(yaml, &root).is_err());
+        }
+        fs::write(
+            child.join("scenario.yml"),
+            fragment.replace("    verifier: pytest\n", ""),
+        )
+        .unwrap();
+        Config::from_yaml_at(&yaml.replace("verifier: dummy", "verifier: pytest"), &root).unwrap();
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -960,8 +1162,52 @@ scenarios:
         );
         assert!(matches!(
             Config::from_yaml(&invalid_test),
-            Err(ConfigError::Parse(_))
+            Err(ConfigError::InvalidPhase { .. })
         ));
+    }
+
+    #[test]
+    fn verify_contains_tests_and_rejects_legacy_or_opaque_payloads() {
+        let base = "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  root:\n";
+        for value in ["    verify:\n", "    verify: {}\n"] {
+            let config = Config::from_yaml(&format!("{base}{value}")).unwrap();
+            let scenario = config.scenario("root").unwrap();
+            assert!(scenario.has_phase(ConfiguredPhase::Verify));
+            assert_eq!(scenario.tests.iter().count(), 0);
+        }
+        let config = Config::from_yaml(&format!("{base}    create:\n")).unwrap();
+        assert!(
+            !config
+                .scenario("root")
+                .unwrap()
+                .has_phase(ConfiguredPhase::Verify)
+        );
+        let config = Config::from_yaml(&format!(
+            "{base}    verify:\n      z: {{}}\n      a: {{status: fail}}\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            config
+                .scenario("root")
+                .unwrap()
+                .tests
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "a"]
+        );
+        for value in [
+            "    tests: {}\n",
+            "    verify: script.py\n",
+            "    verify: []\n",
+            "    verify:\n      same: {}\n      same: {}\n",
+            "    verify: {pytest: {path: test.py}}\n",
+        ] {
+            assert!(
+                Config::from_yaml(&format!("{base}{value}")).is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]

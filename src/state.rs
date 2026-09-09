@@ -161,6 +161,8 @@ impl ErrorRecord {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioState {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub views: BTreeMap<String, Resource>,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_path: Option<String>,
@@ -176,6 +178,7 @@ impl ScenarioState {
     pub fn new(path: impl Into<String>, parent_path: Option<String>) -> Self {
         Self {
             path: path.into(),
+            views: BTreeMap::new(),
             parent_path,
             phases: BTreeMap::new(),
             test_results: Vec::new(),

@@ -13,12 +13,11 @@ scenarios:
       dummy:
         status: ok
     idempotence:
-    verify:
     cleanup:
     destroy:
       dummy:
         status: ok
-    tests:
+    verify:
       smoke:
         verifier: dummy
         status: ok

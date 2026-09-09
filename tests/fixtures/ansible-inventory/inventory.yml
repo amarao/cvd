@@ -1,0 +1,11 @@
+all:
+  children:
+    cvd_managed:
+      hosts:
+        web:
+          ansible_host: before-creation.invalid
+    webservers:
+      hosts:
+        web: {}
+        external:
+          ansible_connection: local

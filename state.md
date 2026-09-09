@@ -75,6 +75,24 @@ Internal execution status is `pending` or `running`. A completed phase result is
 - Redact sensitive resource attributes before serialization. The dummy has no
   sensitive attributes, but the state shape must allow redaction later.
 
+## Ansible inventory views
+
+Scenario state optionally contains a `views` mapping. `ansible_inventory` is a
+CVD-owned resource of type `view.ansible.inventory`; its `attributes.path`
+locates the generated YAML file under the run's `views/<encoded-selector>/`
+directory. View resources are separate from provisioner resource manifests,
+so adapters never destroy them and resource change counts exclude them.
+
+The directory is private (0700), and the overlay is written atomically with
+0600 permissions. Its host data is derived from persisted live ancestor and
+scenario resources before each Ansible converger invocation or pytest test. The view path is
+saved before launching Ansible. It remains available after destruction as a
+record of the last rendered inventory, not a live resource-existence query.
+The optional field is additive to schema version 3; older records load with no
+views. Original inventory sources and their variable files are not copied.
+Do not report credentials in resource manifests: encrypted secret persistence
+and external secret references remain deferred.
+
 ## Deferred decisions
 
 - Stable project identity and the final default storage directory.

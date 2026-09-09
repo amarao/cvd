@@ -1,26 +1,78 @@
 ---
-- name: Create a Docker container and report it as a CVD host
+- name: Cache the images required by managed hosts
   hosts: localhost
   connection: local
   gather_facts: false
+  vars:
+    required_images: "{{ groups['cvd_managed'] | map('extract', hostvars, 'container_image') | unique | list }}"
   tasks:
-    - name: Start the example container
+    - name: Pull each required image
+      ansible.builtin.command:
+        argv: [docker, image, pull, "{{ item }}"]
+      loop: "{{ required_images }}"
+      register: image_pull
+      changed_when: "'Downloaded newer image' in image_pull.stdout"
+
+    - name: Inspect the cached images
+      ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ item }}"]
+      loop: "{{ required_images }}"
+      register: image_inspect
+      changed_when: false
+
+    - name: Initialize image resources
+      ansible.builtin.set_fact:
+        cvd_images: []
+
+    - name: Record actual image IDs as non-host resources
+      ansible.builtin.set_fact:
+        cvd_images: >-
+          {{ cvd_images + [{'id': (item.stdout | from_json)[0].Id,
+                            'type': 'docker.image',
+                            'attributes': {'reference': item.item}}] }}
+      loop: "{{ image_inspect.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+- name: Create containers declared in the managed inventory group
+  hosts: cvd_managed
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Start a container
       ansible.builtin.command:
         argv:
           - docker
           - run
           - --detach
           - --name
-          - "{{ cvd.vars.container_name }}"
-          - "{{ cvd.vars.container_image }}"
+          - "cvd-{{ inventory_hostname }}-{{ cvd.invocation_id }}"
+          - "{{ container_image }}"
           - sleep
           - infinity
       register: docker_run
       changed_when: true
 
-    - name: Publish the complete aggregate resource manifest
+    - name: Describe the created resource and its runtime host connection
+      ansible.builtin.set_fact:
+        cvd_resource:
+          id: "{{ docker_run.stdout }}"
+          type: docker.container
+          attributes:
+            ansible:
+              inventory_hostname: "{{ inventory_hostname }}"
+              vars:
+                ansible_host: "{{ docker_run.stdout }}"
+                ansible_connection: community.docker.docker
+
+- name: Publish the aggregate manifest on the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Publish containers and cached images atomically
       ansible.builtin.copy:
-        dest: "{{ lookup('env', 'CVD_RESULT_FILE') }}"
+        dest: "{{ cvd.result_file }}"
         mode: "0600"
         content: >-
           {{
@@ -28,19 +80,7 @@
               'protocol_version': cvd.protocol_version,
               'invocation_id': cvd.invocation_id,
               'complete': true,
-              'resources': [
-                {
-                  'id': docker_run.stdout,
-                  'type': 'docker.container',
-                  'attributes': {
-                    'name': cvd.vars.container_name,
-                    'image': cvd.vars.container_image,
-                    'ansible_host': cvd.vars.container_name,
-                    'ansible_connection': 'docker'
-                  },
-                  'relationships': [],
-                  'sensitive_attributes': []
-                }
-              ]
+              'resources': (groups['cvd_managed'] | map('extract', hostvars, 'cvd_resource') | list)
+                           + (cvd_images | unique(attribute='id') | list)
             } | to_nice_json
           }}

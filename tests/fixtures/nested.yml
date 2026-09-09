@@ -7,18 +7,16 @@ scenarios:
     create:
     prepare:
     converge:
-    verify:
     cleanup:
     destroy:
-    tests:
+    verify:
       smoke: {}
     nested:
       - name: restart
         create:
         converge:
-        verify:
         destroy:
-        tests:
+        verify:
           after-restart: {}
         nested:
           - name: deep

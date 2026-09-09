@@ -1,0 +1,12 @@
+---
+- name: Check destruction ownership without deleting the discovered controller
+  hosts: cvd_managed
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Ensure external inventory hosts never became owned resources
+      ansible.builtin.assert:
+        that:
+          - cvd.resources | length == 0
+          - cvd_resource.id == 'local-web'
+          - groups['cvd_managed'] == ['web']

@@ -1,0 +1,23 @@
+---
+- name: Exercise the original inventory and the runtime connection
+  hosts: webservers
+  gather_facts: false
+  tasks:
+    - name: Check inherited group variables and external membership
+      ansible.builtin.assert:
+        that:
+          - greeting == 'from group_vars'
+          - "'external' in groups['webservers']"
+          - cvd.action in ['prepare', 'converge', 'cleanup']
+          - cvd.input_file == lookup('env', 'CVD_INPUT_FILE')
+          - cvd.result_file == lookup('env', 'CVD_RESULT_FILE')
+          - cvd.invocation_id == lookup('env', 'CVD_INVOCATION_ID')
+    - name: Check managed host enrichment and original host variables
+      ansible.builtin.assert:
+        that:
+          - ansible_host == '127.0.0.1'
+          - host_setting == 'from host_vars'
+      when: inventory_hostname == 'web'
+    - name: Actually execute using the selected connection
+      ansible.builtin.command: /bin/true
+      changed_when: false

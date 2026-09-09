@@ -1,0 +1,31 @@
+---
+- name: Discover an existing local resource for the test
+  hosts: cvd_managed
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Report runtime data
+      ansible.builtin.set_fact:
+        cvd_resource:
+          id: "local-{{ inventory_hostname }}"
+          type: test.local
+          attributes:
+            ansible:
+              inventory_hostname: "{{ inventory_hostname }}"
+              vars:
+                ansible_host: 127.0.0.1
+                ansible_connection: local
+- name: Publish resource discovery
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Publish the completed manifest
+      ansible.builtin.copy:
+        dest: "{{ cvd.result_file }}"
+        mode: "0600"
+        content: >-
+          {{ {'protocol_version': 1, 'invocation_id': cvd.invocation_id,
+              'complete': true,
+              'resources': groups['cvd_managed'] | map('extract', hostvars, 'cvd_resource') | list}
+              | to_nice_json }}

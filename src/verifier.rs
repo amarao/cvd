@@ -1,5 +1,9 @@
-//! Verifier interface and the no-op implementation used by the stub.
+//! Named dummy and pytest verifier invocations.
 
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 use thiserror::Error;
 
 use crate::{
@@ -14,6 +18,7 @@ pub trait Verifier {
         scenario_path: &str,
         test_name: &str,
         test: &Test,
+        inventory: Option<&Path>,
     ) -> Result<VerifierStatus, VerifierError>;
 }
 
@@ -27,6 +32,7 @@ impl Verifier for DummyVerifier {
         _scenario_path: &str,
         _test_name: &str,
         test: &Test,
+        _inventory: Option<&Path>,
     ) -> Result<VerifierStatus, VerifierError> {
         Ok(match test.status {
             DummyStatus::Ok => VerifierStatus::Pass,
@@ -39,3 +45,57 @@ impl Verifier for DummyVerifier {
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct VerifierError(pub String);
+
+/// Pytest also runs testinfra when its plugin is installed in the selected environment.
+pub struct PytestVerifier {
+    pub default_is_pytest: bool,
+    pub working_directory: PathBuf,
+    pub inventory: crate::inventory::AnsibleInventory,
+}
+
+impl Verifier for PytestVerifier {
+    fn verify(
+        &self,
+        scenario_path: &str,
+        test_name: &str,
+        test: &Test,
+        overlay: Option<&Path>,
+    ) -> Result<VerifierStatus, VerifierError> {
+        let selected = test
+            .verifier
+            .as_deref()
+            .map_or(self.default_is_pytest, |name| name == "pytest");
+        if !selected {
+            return DummyVerifier.verify(scenario_path, test_name, test, overlay);
+        }
+        let pytest = test
+            .pytest
+            .as_ref()
+            .ok_or_else(|| VerifierError("pytest verifier requires a test path".to_owned()))?;
+        self.inventory
+            .validate_bindings(overlay, &self.working_directory)
+            .map_err(|error| VerifierError(error.to_string()))?;
+        let inventory = self
+            .inventory
+            .environment(overlay)
+            .map_err(|error| VerifierError(error.to_string()))?;
+        let status = Command::new("pytest")
+            .args(&pytest.args)
+            .arg(&pytest.path)
+            .current_dir(&self.working_directory)
+            .env("ANSIBLE_INVENTORY", inventory)
+            .status()
+            .map_err(|error| {
+                VerifierError(format!(
+                    "cannot run pytest for `{scenario_path}::{test_name}`: {error}"
+                ))
+            })?;
+        if status.success() {
+            Ok(VerifierStatus::Pass)
+        } else {
+            Err(VerifierError(format!(
+                "pytest for `{scenario_path}::{test_name}` exited with {status}"
+            )))
+        }
+    }
+}
