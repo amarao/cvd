@@ -28,7 +28,10 @@ resources and generates a private runtime inventory overlay before converge.
 Ansible loads the original inventory first and the overlay last, retaining
 normal group variables and connection-variable precedence. Converge targets
 `webservers` through the discovered Docker connection, using `raw` because the
-Alpine image has no Python. The named `greeting` test runs pytest/testinfra
+Alpine image has no Python. The named `greeting_ansible` test overrides the
+default verifier with `ansible` and runs `verify.yml` against the same inventory.
+It reads `/tmp/cvd-greeting` with `raw` and asserts that its content matches the
+host's `greeting` variable. The named `greeting` test runs pytest/testinfra
 against `webservers` and checks the file content. The test module selects the
 group with `testinfra_hosts = ["ansible://webservers"]`; pytest arguments
 only control reporting. CVD sets `ANSIBLE_INVENTORY`
@@ -36,10 +39,11 @@ to the original sources followed by the runtime overlay; testinfra's Ansible
 backend reads it without an inventory CLI argument. Destroy removes only
 persisted owned container IDs, then purges the recorded image IDs.
 
-Each named entry under `verify` supplies `pytest.path` (relative to its scenario file) and optional
-`pytest.args` passed literally to `pytest`. For now every nonzero pytest exit
-is an `error`, including failed assertions, collection errors, and no tests.
-Cleanup and destruction still run.
+The Ansible test supplies `ansible.playbook`; the pytest test supplies
+`pytest.path` and optional `pytest.args` passed literally to `pytest`. Both
+paths are relative to the scenario file. Every nonzero Ansible or pytest exit
+is an `error`, including failed assertions. Later tests stop, and normal
+cleanup and destruction still run.
 
 Hosts outside `cvd_managed` can be existing machines with ordinary connection
 variables. They are not created or destroyed by these playbooks; any play

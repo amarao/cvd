@@ -13,6 +13,10 @@ scenarios:
       ansible:
         playbook: converge.yml
     verify:
+      greeting_ansible:
+        verifier: ansible
+        ansible:
+          playbook: verify.yml
       greeting:
         pytest:
           path: tests/test_web.py
