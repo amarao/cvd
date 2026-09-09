@@ -631,6 +631,10 @@ cvd = json.load(open(os.environ['CVD_INPUT_FILE']))['cvd']
 assert cvd['input_file'] == os.environ['CVD_INPUT_FILE']
 assert cvd['result_file'] == os.environ['CVD_RESULT_FILE']
 assert cvd['invocation_id'] == os.environ['CVD_INVOCATION_ID']
+expected_groups = {}
+for resource in cvd['resources']:
+    expected_groups.setdefault(resource['type'], []).append(resource)
+assert cvd['resources_by_type'] == expected_groups
 mode = os.environ['CVD_TEST_MODE']
 args = sys.argv[1:]
 sources = [args[i+1] for i, arg in enumerate(args) if arg == '--inventory']
@@ -644,6 +648,8 @@ if cvd['action'] == 'create':
     if mode == 'duplicate': resources.append({'id': 'other-id', 'type': 'container', 'attributes': {'ansible': binding}})
     json.dump({'protocol_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': resources}, open(cvd['result_file'], 'w'))
 elif cvd['action'] in ['converge', 'cleanup']:
+    assert cvd['resources_by_type']['docker.container'][0]['id'] == 'container-id'
+    assert cvd['resources_by_type']['docker.network'][0]['id'] == 'network-id'
     assert len(sources) == 2
     record['overlay'] = pathlib.Path(sources[1]).read_text()
 elif cvd['action'] == 'destroy':
@@ -863,6 +869,10 @@ cvd = json.load(open(os.environ['CVD_INPUT_FILE']))['cvd']
 assert cvd['input_file'] == os.environ['CVD_INPUT_FILE']
 assert cvd['result_file'] == os.environ['CVD_RESULT_FILE']
 assert cvd['invocation_id'] == os.environ['CVD_INVOCATION_ID']
+expected_groups = {}
+for resource in cvd['resources']:
+    expected_groups.setdefault(resource['type'], []).append(resource)
+assert cvd['resources_by_type'] == expected_groups
 if cvd['action'] == 'create':
     json.dump({'protocol_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': [{'id': 'actual-web', 'type': 'container', 'attributes': {'ansible': {'inventory_hostname': 'web', 'vars': {'ansible_host': 'runtime-web'}}}}]}, open(cvd['result_file'], 'w'))
 else:

@@ -2,7 +2,7 @@
 
 use crate::{
     config::{DummyStatus, PhaseDefinition},
-    state::LifecyclePhase,
+    state::{LifecyclePhase, Resource},
 };
 use std::{io::Write, path::Path};
 use thiserror::Error;
@@ -14,6 +14,7 @@ pub trait Converger {
         phase: LifecyclePhase,
         definition: &PhaseDefinition,
         inventory: Option<&Path>,
+        resources: &[Resource],
         output: &mut dyn Write,
         styled_output: bool,
     ) -> Result<(), ConvergerError>;
@@ -30,6 +31,7 @@ impl Converger for DummyConverger {
         phase: LifecyclePhase,
         definition: &PhaseDefinition,
         _inventory: Option<&Path>,
+        _resources: &[Resource],
         _output: &mut dyn Write,
         _styled_output: bool,
     ) -> Result<(), ConvergerError> {
@@ -60,6 +62,7 @@ impl Converger for AnsibleConverger {
         phase: LifecyclePhase,
         definition: &PhaseDefinition,
         inventory: Option<&Path>,
+        resources: &[Resource],
         output: &mut dyn Write,
         styled_output: bool,
     ) -> Result<(), ConvergerError> {
@@ -75,7 +78,7 @@ impl Converger for AnsibleConverger {
                 }
             };
             self.runtime
-                .converge(scenario_path, action, ansible, inventory)
+                .converge(scenario_path, action, ansible, inventory, resources)
                 .map_err(|error| ConvergerError(error.to_string()))
         } else if self.default_is_ansible && !definition.is_dummy_override() {
             Err(ConvergerError(
@@ -87,6 +90,7 @@ impl Converger for AnsibleConverger {
                 phase,
                 definition,
                 inventory,
+                resources,
                 output,
                 styled_output,
             )

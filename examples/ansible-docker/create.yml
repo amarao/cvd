@@ -6,6 +6,7 @@
   vars:
     required_images: "{{ groups['cvd_managed'] | map('extract', hostvars, 'container_image') | unique | list }}"
   tasks:
+    # We pretend this pulled image is a resource we create/destroy
     - name: Pull each required image
       ansible.builtin.command:
         argv: [docker, image, pull, "{{ item }}"]

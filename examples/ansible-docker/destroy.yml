@@ -26,10 +26,9 @@
     - name: Remove the recorded cached image
       ansible.builtin.command:
         argv: [docker, image, rm, "{{ item.id }}"]
-      loop: "{{ cvd.resources }}"
+      loop: "{{ cvd.resources_by_type.get('docker.image', []) }}"
       loop_control:
         label: "{{ item.id }}"
-      when: item.type == 'docker.image'
       register: image_remove
       changed_when: image_remove.rc == 0
       failed_when:

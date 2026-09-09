@@ -416,11 +416,13 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         } else {
             None
         };
+        let resources = self.state.visible_resources(path);
         match self.converger.run(
             path,
             phase.clone(),
             definition,
             inventory.as_deref(),
+            &resources,
             &mut self.output,
             self.styled_output,
         ) {

@@ -208,6 +208,29 @@ pub struct RunState {
 }
 
 impl RunState {
+    /// Existing resources visible to a scenario, ancestors first, in manifest order.
+    pub(crate) fn visible_resources(&self, path: &str) -> Vec<Resource> {
+        let mut resources = Vec::new();
+        let mut ancestor = String::new();
+        for component in path.split('/') {
+            if !ancestor.is_empty() {
+                ancestor.push('/');
+            }
+            ancestor.push_str(component);
+            if let Some(scenario) = self.scenarios.get(&ancestor) {
+                resources.extend(
+                    scenario
+                        .resources
+                        .resources
+                        .iter()
+                        .filter(|resource| resource.exists)
+                        .cloned(),
+                );
+            }
+        }
+        resources
+    }
+
     pub fn new(
         run_id: impl Into<String>,
         configuration_path: PathBuf,

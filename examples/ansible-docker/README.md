@@ -15,7 +15,8 @@ cargo run -- run --file examples/ansible-docker/cvd.yml
 
 Create first pulls each distinct `container_image` into the local Docker cache
 and records its actual image ID as a `docker.image` resource. Images have no
-Ansible host binding, so they are passed to destroy in `cvd.resources`. Hosts
+Ansible host binding, so they are passed to destroy in `cvd.resources` and grouped under
+`cvd.resources_by_type['docker.image']`. Hosts
 sharing an image share one image resource. This example takes ownership of the
 cached image even if it was already present, and purges it during destroy.
 Image removal does not use force: Docker can refuse removal when another
@@ -65,6 +66,11 @@ variables remain available for scripts.
 Destroy targets `cvd_managed` directly. CVD rebuilds this group from the
 scenario's owned host resources and exposes each as `cvd_resource`; the Docker
 playbook removes `cvd_resource.id` using a local connection. A second controller
-play loops over `cvd.resources` to purge the cached images after the containers
+play loops over `cvd.resources_by_type.get('docker.image', [])` to purge images after the containers
 have been removed.
 The original inventory is not loaded during destroy.
+
+Prepare, converge, and cleanup also receive `cvd.resources` and
+`cvd.resources_by_type`, including existing resources inherited from parents.
+Create builds separate container and image lists and combines them in the
+manifest; the manifest format is unchanged.

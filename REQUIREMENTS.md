@@ -380,8 +380,10 @@ implemented.
 
 Ansible converger phases require explicit `ansible: {playbook: ..., vars: ...}`
 mappings, with the same path and `cvd` extra-vars conventions as the provisioner.
-`cvd.action` names the phase and `cvd.resources` is empty for convergence;
-runtime host data comes through inventory. No result manifest is required:
+`cvd.action` names the phase. `cvd.resources` contains existing resources
+visible to the scenario (ancestors first, followed by its own resources),
+including hosts and non-hosts. Siblings, destroyed resources, and generated
+view artifacts are excluded. Runtime host data also comes through inventory. No result manifest is required:
 a nonzero exit or launch failure is a phase error. Explicit `dummy` mappings
 can override the top-level converger. Lists containing Ansible actions are
 rejected until ordered real-adapter lists are implemented.
@@ -396,6 +398,27 @@ artifact. Source inventory files remain user-owned and are not snapshotted.
 Resource masking is not yet implemented. Excluding a resource from an overlay
 would not remove its host from original inventory sources; execution selection
 for masked hosts requires a separate design before masking is implemented.
+
+### Resource lists by type
+
+All Ansible provisioner and converger invocations receive
+`cvd.resources_by_type`, a mapping from exact resource type strings to ordered
+lists of full resource records. It groups the same resources supplied in
+`cvd.resources`, preserving their order within each type. Missing types are
+omitted; use `.get('docker.image', [])` for an optional type.
+
+- Create receives `cvd.resources: []` and `cvd.resources_by_type: {}`. Requested
+  objects remain inventory variables or playbook-defined lists in `cvd.vars`.
+- Prepare, converge, and cleanup receive all existing visible resources,
+  including inherited resources and both host and non-host types.
+- Destroy receives only existing owned non-host resources in these lists;
+  owned hosts remain in `cvd_managed` with their `cvd_resource` records.
+  Malformed bindings without a usable host name retain the documented fallback.
+
+The canonical create result stays one ordered `resources` list. Playbooks may
+assemble typed lists and concatenate them when reporting actual created objects.
+The grouping is derived invocation input, not a new manifest or persisted-state
+schema. Resource records are identical in the flat and grouped representations.
 
 ## Pytest verifier
 

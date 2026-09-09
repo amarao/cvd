@@ -16,7 +16,7 @@ scenarios:
       greeting:
         pytest:
           path: tests/test_web.py
-          args: ["-q"]
+          args: ["-v"]
     destroy:
       ansible:
         playbook: destroy.yml

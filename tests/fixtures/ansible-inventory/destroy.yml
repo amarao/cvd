@@ -8,5 +8,6 @@
       ansible.builtin.assert:
         that:
           - cvd.resources | length == 0
+          - cvd.resources_by_type == {}
           - cvd_resource.id == 'local-web'
           - groups['cvd_managed'] == ['web']

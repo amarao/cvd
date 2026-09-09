@@ -9,6 +9,9 @@
           - greeting == 'from group_vars'
           - "'external' in groups['webservers']"
           - cvd.action in ['prepare', 'converge', 'cleanup']
+          - cvd.resources | length == 1
+          - cvd.resources[0].id == 'local-web'
+          - cvd.resources_by_type['test.local'] == cvd.resources
           - cvd.input_file == lookup('env', 'CVD_INPUT_FILE')
           - cvd.result_file == lookup('env', 'CVD_RESULT_FILE')
           - cvd.invocation_id == lookup('env', 'CVD_INVOCATION_ID')

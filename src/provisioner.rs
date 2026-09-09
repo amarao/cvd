@@ -111,6 +111,7 @@ impl AnsibleProvisioner {
         action: &'static str,
         definition: &crate::config::AnsiblePhaseDefinition,
         overlay: Option<&std::path::Path>,
+        resources: &[Resource],
     ) -> Result<(), ProvisionerError> {
         self.inventory
             .validate_bindings(
@@ -118,7 +119,7 @@ impl AnsibleProvisioner {
                 definition.playbook.parent().expect("resolved playbook"),
             )
             .map_err(|error| ProvisionerError(error.to_string()))?;
-        self.run(scenario_path, action, &[], definition, false, overlay)
+        self.run(scenario_path, action, resources, definition, false, overlay)
             .map(|_| ())
     }
 
@@ -161,6 +162,7 @@ impl AnsibleProvisioner {
                 scenario_path,
                 vars: &definition.vars,
                 resources,
+                resources_by_type: resources_by_type(resources),
             },
         };
         fs::write(
@@ -321,6 +323,7 @@ struct CvdInput<'a> {
     scenario_path: &'a str,
     vars: &'a serde_json::Value,
     resources: &'a [Resource],
+    resources_by_type: BTreeMap<&'a str, Vec<&'a Resource>>,
 }
 
 #[derive(Deserialize)]
@@ -451,6 +454,47 @@ mod destroy_tests {
     }
 
     #[test]
+    fn converger_visibility_and_grouping_preserve_inheritance_and_order() {
+        let mut state = crate::state::RunState::new("run", "cvd.yml".into(), "x", None, false);
+        state.enter_scenario("root", None);
+        state.enter_scenario("root/child", Some("root".into()));
+        state.enter_scenario("root/sibling", Some("root".into()));
+        let mut host = resource("parent-host", Some("web"));
+        host.created.scenario_path = "root".into();
+        host.resource_type = "container".into();
+        let mut image = resource("parent-image", None);
+        image.created.scenario_path = "root".into();
+        image.resource_type = "docker.image".into();
+        let mut child_image = image.clone();
+        child_image.id = "child-image".into();
+        child_image.created.scenario_path = "root/child".into();
+        let mut deleted = resource("deleted", None);
+        deleted.exists = false;
+        state.scenarios.get_mut("root").unwrap().resources.resources =
+            vec![host.clone(), image.clone()];
+        state
+            .scenarios
+            .get_mut("root/child")
+            .unwrap()
+            .resources
+            .resources = vec![child_image.clone(), deleted];
+        state
+            .scenarios
+            .get_mut("root/sibling")
+            .unwrap()
+            .resources
+            .resources = vec![resource("sibling", None)];
+        let visible = state.visible_resources("root/child");
+        assert_eq!(visible, [host, image, child_image]);
+        let grouped = resources_by_type(&visible);
+        assert_eq!(grouped["docker.image"], [&visible[1], &visible[2]]);
+        assert_eq!(grouped["container"], [&visible[0]]);
+        assert!(!grouped.contains_key("missing"));
+        assert!(resources_by_type(&[]).is_empty());
+        assert_eq!(state.visible_resources("root").len(), 2);
+    }
+
+    #[test]
     fn destroy_separates_owned_hosts_from_other_resources_in_order() {
         let mut parent = resource("parent", Some("parent"));
         parent.created.scenario_path = "root".into();
@@ -508,4 +552,15 @@ mod destroy_tests {
         );
         assert_eq!(others[0].id, "malformed");
     }
+}
+
+fn resources_by_type(resources: &[Resource]) -> BTreeMap<&str, Vec<&Resource>> {
+    let mut grouped = BTreeMap::new();
+    for resource in resources {
+        grouped
+            .entry(resource.resource_type.as_str())
+            .or_insert_with(Vec::new)
+            .push(resource);
+    }
+    grouped
 }
