@@ -36,6 +36,10 @@ pub struct RunArgs {
     #[arg(short = 'f', long, default_value = "cvd.yml", value_name = "FILE")]
     pub file: PathBuf,
 
+    /// Directory containing cvd.yaml (alternative to --file).
+    #[arg(short = 'F', long, value_name = "DIR", conflicts_with = "file")]
+    pub directory: Option<PathBuf>,
+
     /// State directory, overriding the project-local default.
     #[arg(long, value_name = "DIR")]
     pub state_dir: Option<PathBuf>,
@@ -65,6 +69,10 @@ pub struct StateViewArgs {
     #[arg(short = 'f', long, default_value = "cvd.yml", value_name = "FILE")]
     pub file: PathBuf,
 
+    /// Directory containing cvd.yaml (alternative to --file).
+    #[arg(short = 'F', long, value_name = "DIR", conflicts_with = "file")]
+    pub directory: Option<PathBuf>,
+
     /// State directory, overriding the project-local default.
     #[arg(long, value_name = "DIR")]
     pub state_dir: Option<PathBuf>,
@@ -84,6 +92,10 @@ pub struct StateResourcesArgs {
     #[arg(short = 'f', long, default_value = "cvd.yml", value_name = "FILE")]
     pub file: PathBuf,
 
+    /// Directory containing cvd.yaml (alternative to --file).
+    #[arg(short = 'F', long, value_name = "DIR", conflicts_with = "file")]
+    pub directory: Option<PathBuf>,
+
     /// State directory, overriding the project-local default.
     #[arg(long, value_name = "DIR")]
     pub state_dir: Option<PathBuf>,
@@ -99,9 +111,17 @@ pub struct StateReportArgs {
     #[arg(short = 'f', long, default_value = "cvd.yml", value_name = "FILE")]
     pub file: PathBuf,
 
+    /// Directory containing cvd.yaml (alternative to --file).
+    #[arg(short = 'F', long, value_name = "DIR", conflicts_with = "file")]
+    pub directory: Option<PathBuf>,
+
     /// State directory, overriding the project-local default.
     #[arg(long, value_name = "DIR")]
     pub state_dir: Option<PathBuf>,
+}
+
+pub fn configuration_file(file: &std::path::Path, directory: Option<&std::path::Path>) -> PathBuf {
+    directory.map_or_else(|| file.to_owned(), |directory| directory.join("cvd.yaml"))
 }
 
 #[cfg(test)]
@@ -109,6 +129,27 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Command, ViewFormat};
+
+    #[test]
+    fn directory_option_is_available_on_all_commands_and_conflicts_with_file() {
+        for command in ["run", "state-view", "state-resources", "state-report"] {
+            let parsed = Cli::try_parse_from(["cvd", command, "-F", "project"]).unwrap();
+            let (file, directory) = match parsed.command {
+                Command::Run(args) => (args.file, args.directory),
+                Command::StateView(args) => (args.file, args.directory),
+                Command::StateResources(args) => (args.file, args.directory),
+                Command::StateReport(args) => (args.file, args.directory),
+            };
+            assert_eq!(
+                super::configuration_file(&file, directory.as_deref()),
+                std::path::PathBuf::from("project/cvd.yaml")
+            );
+            assert!(
+                Cli::try_parse_from(["cvd", command, "-f", "other.yml", "-F", "project"]).is_err()
+            );
+            assert!(Cli::try_parse_from(["cvd", command, "-F"]).is_err());
+        }
+    }
 
     #[test]
     fn parses_run_with_defaults() {

@@ -25,7 +25,7 @@
         dest: "{{ cvd.result_file }}"
         mode: "0600"
         content: >-
-          {{ {'protocol_version': 1, 'invocation_id': cvd.invocation_id,
+          {{ {'manifest_version': 1, 'invocation_id': cvd.invocation_id,
               'complete': true,
               'resources': groups['cvd_managed'] | map('extract', hostvars, 'cvd_resource') | list}
               | to_nice_json }}

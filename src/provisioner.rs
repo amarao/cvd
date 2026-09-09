@@ -19,6 +19,7 @@ use crate::{
 
 static NEXT_EXCHANGE: AtomicU64 = AtomicU64::new(0);
 const PROTOCOL_VERSION: u32 = 1;
+const MANIFEST_VERSION: u32 = 1;
 
 pub trait Provisioner {
     fn create(
@@ -158,8 +159,9 @@ impl AnsibleProvisioner {
                 invocation_id: &exchange.invocation_id,
                 input_file: &exchange.input,
                 result_file: &exchange.result,
+                directory: &self.working_directory,
                 action,
-                scenario_path,
+                scenario_selector: scenario_path,
                 vars: &definition.vars,
                 resources,
                 resources_by_type: resources_by_type(resources),
@@ -190,6 +192,7 @@ impl AnsibleProvisioner {
             .arg("--extra-vars")
             .arg(format!("@{}", exchange.input.display()))
             .current_dir(&self.working_directory)
+            .env("CVD_DIRECTORY", &self.working_directory)
             .env("CVD_INPUT_FILE", &exchange.input)
             .env("CVD_RESULT_FILE", &exchange.result)
             .env("CVD_INVOCATION_ID", &exchange.invocation_id)
@@ -217,10 +220,10 @@ impl AnsibleProvisioner {
                 ))
             })?)
             .map_err(|error| ProvisionerError(format!("invalid Ansible create result: {error}")))?;
-        if result.protocol_version != PROTOCOL_VERSION {
+        if result.manifest_version != MANIFEST_VERSION {
             return Err(ProvisionerError(format!(
-                "unsupported Ansible result protocol version {}",
-                result.protocol_version
+                "unsupported Ansible manifest version {}",
+                result.manifest_version
             )));
         }
         if result.invocation_id != exchange.invocation_id {
@@ -319,8 +322,9 @@ struct CvdInput<'a> {
     invocation_id: &'a str,
     input_file: &'a std::path::Path,
     result_file: &'a std::path::Path,
+    directory: &'a std::path::Path,
     action: &'static str,
-    scenario_path: &'a str,
+    scenario_selector: &'a str,
     vars: &'a serde_json::Value,
     resources: &'a [Resource],
     resources_by_type: BTreeMap<&'a str, Vec<&'a Resource>>,
@@ -329,7 +333,7 @@ struct CvdInput<'a> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateResult {
-    protocol_version: u32,
+    manifest_version: u32,
     invocation_id: String,
     complete: bool,
     resources: Vec<ReportedResource>,
@@ -428,6 +432,23 @@ fn destroy_targets(scenario: &str, resources: &[Resource]) -> (serde_json::Value
 #[cfg(test)]
 mod destroy_tests {
     use super::*;
+
+    #[test]
+    fn create_manifest_requires_manifest_version() {
+        let mut manifest = serde_json::json!({
+            "manifest_version": 1,
+            "invocation_id": "test-call",
+            "complete": true,
+            "resources": []
+        });
+        let result: CreateResult = serde_json::from_value(manifest.clone()).unwrap();
+        assert_eq!(result.manifest_version, MANIFEST_VERSION);
+
+        let fields = manifest.as_object_mut().unwrap();
+        fields.remove("manifest_version");
+        fields.insert("protocol_version".to_owned(), serde_json::json!(1));
+        assert!(serde_json::from_value::<CreateResult>(manifest).is_err());
+    }
     use serde_json::json;
 
     fn resource(id: &str, name: Option<&str>) -> Resource {

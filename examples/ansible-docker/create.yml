@@ -78,7 +78,7 @@
         content: >-
           {{
             {
-              'protocol_version': cvd.protocol_version,
+              'manifest_version': 1,
               'invocation_id': cvd.invocation_id,
               'complete': true,
               'resources': (groups['cvd_managed'] | map('extract', hostvars, 'cvd_resource') | list)

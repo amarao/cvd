@@ -83,6 +83,7 @@ impl Verifier for PytestVerifier {
             .args(&pytest.args)
             .arg(&pytest.path)
             .current_dir(&self.working_directory)
+            .env("CVD_DIRECTORY", &self.working_directory)
             .env("ANSIBLE_INVENTORY", inventory)
             .status()
             .map_err(|error| {

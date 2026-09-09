@@ -12,6 +12,7 @@
           - cvd.resources | length == 1
           - cvd.resources[0].id == 'local-web'
           - cvd.resources_by_type['test.local'] == cvd.resources
+          - cvd.directory == lookup('env', 'CVD_DIRECTORY')
           - cvd.input_file == lookup('env', 'CVD_INPUT_FILE')
           - cvd.result_file == lookup('env', 'CVD_RESULT_FILE')
           - cvd.invocation_id == lookup('env', 'CVD_INVOCATION_ID')

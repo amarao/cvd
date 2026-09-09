@@ -537,7 +537,7 @@ scenarios:
         r#"#!/bin/sh
 if grep -q '"action": "create"' "$CVD_INPUT_FILE"; then
   cp "$CVD_INPUT_FILE" "$CVD_CAPTURE_CREATE"
-  printf '{"protocol_version":1,"invocation_id":"%s","complete":true,"resources":[{"id":"container-123","type":"docker.container","attributes":{"name":"example","ansible_connection":"docker"},"relationships":[],"sensitive_attributes":[]}]}' "$CVD_INVOCATION_ID" > "$CVD_RESULT_FILE"
+  printf '{"manifest_version":1,"invocation_id":"%s","complete":true,"resources":[{"id":"container-123","type":"docker.container","attributes":{"name":"example","ansible_connection":"docker"},"relationships":[],"sensitive_attributes":[]}]}' "$CVD_INVOCATION_ID" > "$CVD_RESULT_FILE"
 else
   cp "$CVD_INPUT_FILE" "$CVD_CAPTURE_DESTROY"
 fi
@@ -573,6 +573,9 @@ fi
 
     let create = load_state(&create_input);
     assert_eq!(create["cvd"]["action"], "create");
+    assert_eq!(create["cvd"]["directory"], directory.to_str().unwrap());
+    assert_eq!(create["cvd"]["scenario_selector"], "host");
+    assert!(create["cvd"].get("scenario_path").is_none());
     assert_eq!(create["cvd"]["vars"]["requested_name"], "example");
     assert_eq!(create["cvd"]["resources"], serde_json::json!([]));
     for field in ["input_file", "result_file"] {
@@ -580,6 +583,9 @@ fi
     }
     let destroy = load_state(&destroy_input);
     assert_eq!(destroy["cvd"]["action"], "destroy");
+    assert_eq!(destroy["cvd"]["directory"], create["cvd"]["directory"]);
+    assert_eq!(destroy["cvd"]["scenario_selector"], "host");
+    assert!(destroy["cvd"].get("scenario_path").is_none());
     for field in ["input_file", "result_file", "invocation_id"] {
         assert_ne!(create["cvd"][field], destroy["cvd"][field]);
     }
@@ -628,9 +634,12 @@ fn ansible_inventory_overlay_preserves_sources_and_cleanup_after_errors() {
         fs::write(&executable, r#"#!/usr/bin/env python3
 import json, os, pathlib, sys
 cvd = json.load(open(os.environ['CVD_INPUT_FILE']))['cvd']
+assert cvd['directory'] == os.environ['CVD_DIRECTORY'] == os.getcwd()
 assert cvd['input_file'] == os.environ['CVD_INPUT_FILE']
 assert cvd['result_file'] == os.environ['CVD_RESULT_FILE']
 assert cvd['invocation_id'] == os.environ['CVD_INVOCATION_ID']
+assert isinstance(cvd['scenario_selector'], str)
+assert 'scenario_path' not in cvd
 expected_groups = {}
 for resource in cvd['resources']:
     expected_groups.setdefault(resource['type'], []).append(resource)
@@ -646,7 +655,7 @@ if cvd['action'] == 'create':
     if mode == 'malformed': binding['vars'] = []
     resources = [{'id': 'container-id', 'type': 'docker.container', 'attributes': {'ansible': binding}}, {'id': 'network-id', 'type': 'docker.network'}]
     if mode == 'duplicate': resources.append({'id': 'other-id', 'type': 'container', 'attributes': {'ansible': binding}})
-    json.dump({'protocol_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': resources}, open(cvd['result_file'], 'w'))
+    json.dump({'manifest_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': resources}, open(cvd['result_file'], 'w'))
 elif cvd['action'] in ['converge', 'cleanup']:
     assert cvd['resources_by_type']['docker.container'][0]['id'] == 'container-id'
     assert cvd['resources_by_type']['docker.network'][0]['id'] == 'network-id'
@@ -866,15 +875,18 @@ scenarios:
         fs::write(&ansible, r#"#!/usr/bin/env python3
 import json, os
 cvd = json.load(open(os.environ['CVD_INPUT_FILE']))['cvd']
+assert cvd['directory'] == os.environ['CVD_DIRECTORY'] == os.getcwd()
 assert cvd['input_file'] == os.environ['CVD_INPUT_FILE']
 assert cvd['result_file'] == os.environ['CVD_RESULT_FILE']
 assert cvd['invocation_id'] == os.environ['CVD_INVOCATION_ID']
+assert isinstance(cvd['scenario_selector'], str)
+assert 'scenario_path' not in cvd
 expected_groups = {}
 for resource in cvd['resources']:
     expected_groups.setdefault(resource['type'], []).append(resource)
 assert cvd['resources_by_type'] == expected_groups
 if cvd['action'] == 'create':
-    json.dump({'protocol_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': [{'id': 'actual-web', 'type': 'container', 'attributes': {'ansible': {'inventory_hostname': 'web', 'vars': {'ansible_host': 'runtime-web'}}}}]}, open(cvd['result_file'], 'w'))
+    json.dump({'manifest_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': [{'id': 'actual-web', 'type': 'container', 'attributes': {'ansible': {'inventory_hostname': 'web', 'vars': {'ansible_host': 'runtime-web'}}}}]}, open(cvd['result_file'], 'w'))
 else:
     json.dump(cvd['resources'], open(os.environ['CVD_TEST_DESTROY'], 'w'))
 "#).unwrap();
@@ -894,6 +906,7 @@ else:
             } else {
                 r#"#!/usr/bin/env python3
 import json, os, pathlib, sys
+assert os.environ['CVD_DIRECTORY'] == os.getcwd()
 sources = os.environ['ANSIBLE_INVENTORY'].split(',')
 record = {'sources': sources, 'args': sys.argv[1:], 'cwd': os.getcwd()}
 if len(sources) > 1: record['overlay'] = pathlib.Path(sources[-1]).read_text()
@@ -999,4 +1012,42 @@ sys.exit(int(mode) if mode.isdigit() else 0)
         }
         fs::remove_dir_all(directory).unwrap();
     }
+}
+
+#[test]
+fn directory_option_selects_yaml_and_state_without_requiring_config_for_inspection() {
+    let directory = test_directory("directory-option");
+    fs::create_dir_all(&directory).unwrap();
+    let config = directory.join("cvd.yaml");
+    fs::write(&config, "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  selected:\n    create:\n    destroy:\n").unwrap();
+    fs::write(directory.join("cvd.yml"), "invalid: must not be selected\n").unwrap();
+    let output = run(&["run", "-F", directory.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state_dir = directory.join(".cvd");
+    let state = load_state(
+        &state_dir
+            .join("runs")
+            .join(last_run_id(&state_dir))
+            .join("state.json"),
+    );
+    assert_eq!(
+        state["configuration_path"],
+        fs::canonicalize(&config).unwrap().to_str().unwrap()
+    );
+    fs::remove_file(config).unwrap();
+    for subcommand in ["state-view", "state-resources", "state-report"] {
+        assert!(
+            run(&[subcommand, "--directory", directory.to_str().unwrap()])
+                .status
+                .success()
+        );
+    }
+    let output = run(&["run", "-F", directory.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cvd.yaml"));
+    fs::remove_dir_all(directory).unwrap();
 }

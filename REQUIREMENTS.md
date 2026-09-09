@@ -222,10 +222,11 @@ single top-level variable is `cvd`:
   "cvd": {
     "protocol_version": 1,
     "invocation_id": "unique-per-call",
+    "directory": "/path/to/project",
     "input_file": "/path/to/current/input.json",
     "result_file": "/path/to/current/result.json",
     "action": "create",
-    "scenario_path": "docker-host",
+    "scenario_selector": "docker-host",
     "vars": {"instance_name": "example"},
     "resources": []
   }
@@ -239,7 +240,7 @@ the path in `cvd.result_file` (also exported as `CVD_RESULT_FILE`):
 
 ```json
 {
-  "protocol_version": 1,
+  "manifest_version": 1,
   "invocation_id": "unique-per-call",
   "complete": true,
   "resources": [
@@ -287,6 +288,12 @@ CVD marks them destroyed. No destroy result file is required. A launch failure
 or non-zero exit leaves the resources recorded as existing. This updates the
 initial protocol-v1 destroy input contract: host resources are no longer also
 included in `cvd.resources`.
+
+Every Ansible invocation also receives `cvd.directory`, exported as
+`CVD_DIRECTORY`: the absolute directory containing the selected root
+configuration file, regardless of whether it was found through the default
+path, `-f`, or `-F`. Both values are always supplied. It is the same for included/nested scenarios and is not
+the temporary exchange directory. Pytest receives `CVD_DIRECTORY` as well.
 
 Every Ansible invocation receives `cvd.input_file`, `cvd.result_file`, and
 `cvd.invocation_id`, with identical values exported as `CVD_INPUT_FILE`,
@@ -479,6 +486,13 @@ Distinguishing pytest assertion failures as `fail` is deferred. This is an
 explicit temporary exception to the general verifier result classification.
 
 ## Execution and selection
+
+All commands accept `-F DIR` / `--directory DIR` as an alternative to
+`-f FILE` / `--file FILE`. `-F` selects exactly `DIR/cvd.yaml`; there is no
+fallback to `cvd.yml`. The two options are mutually exclusive. Without either,
+the existing `cvd.yml` default remains. State commands use the selected path
+only to locate the default `.cvd` directory, without requiring the file to exist.
+
 
 The default root lifecycle is:
 

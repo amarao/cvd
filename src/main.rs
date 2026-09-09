@@ -80,11 +80,11 @@ fn run_cli() -> Result<(), AppError> {
 }
 
 fn run(args: RunArgs) -> Result<(), AppError> {
-    let configuration_path =
-        fs::canonicalize(&args.file).map_err(|source| AppError::Canonicalize {
-            path: args.file.clone(),
-            source,
-        })?;
+    let file = cli::configuration_file(&args.file, args.directory.as_deref());
+    let configuration_path = fs::canonicalize(&file).map_err(|source| AppError::Canonicalize {
+        path: file.clone(),
+        source,
+    })?;
     let configuration_text =
         fs::read_to_string(&configuration_path).map_err(|source| AppError::ReadConfiguration {
             path: configuration_path.clone(),
@@ -157,9 +157,12 @@ fn run(args: RunArgs) -> Result<(), AppError> {
 }
 
 fn state_view(args: StateViewArgs) -> Result<(), AppError> {
-    let state_directory = args
-        .state_dir
-        .unwrap_or_else(|| default_state_directory(&args.file));
+    let state_directory = args.state_dir.unwrap_or_else(|| {
+        default_state_directory(&cli::configuration_file(
+            &args.file,
+            args.directory.as_deref(),
+        ))
+    });
     let repository = StateRepository::new(state_directory);
     let (_, store) = repository.open_run(&args.run)?;
     let state = store.load()?;
@@ -172,9 +175,12 @@ fn state_view(args: StateViewArgs) -> Result<(), AppError> {
 }
 
 fn state_resources(args: StateResourcesArgs) -> Result<(), AppError> {
-    let state_directory = args
-        .state_dir
-        .unwrap_or_else(|| default_state_directory(&args.file));
+    let state_directory = args.state_dir.unwrap_or_else(|| {
+        default_state_directory(&cli::configuration_file(
+            &args.file,
+            args.directory.as_deref(),
+        ))
+    });
     let repository = StateRepository::new(state_directory);
     let (_, store) = repository.open_run(&args.run)?;
     let state = store.load()?;
@@ -189,9 +195,12 @@ fn state_resources(args: StateResourcesArgs) -> Result<(), AppError> {
 }
 
 fn state_report(args: StateReportArgs) -> Result<(), AppError> {
-    let state_directory = args
-        .state_dir
-        .unwrap_or_else(|| default_state_directory(&args.file));
+    let state_directory = args.state_dir.unwrap_or_else(|| {
+        default_state_directory(&cli::configuration_file(
+            &args.file,
+            args.directory.as_deref(),
+        ))
+    });
     let repository = StateRepository::new(state_directory);
     let (_, store) = repository.open_run(&args.run)?;
     let state = store.load()?;

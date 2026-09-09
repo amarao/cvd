@@ -11,3 +11,6 @@ If it will work out, I will announce, if not, I will archive.
 
 See [Writing an Ansible provisioner](docs/provisioner.md) for the playbook
 contract, supplied variables, and create/destroy protocol.
+
+Use `cvd run -F path/to/project` to select `path/to/project/cvd.yaml`, or
+`-f path/to/config.yml` for an explicit file. `-F` also works with state commands.
