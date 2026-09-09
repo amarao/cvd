@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Rust and Ansible tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Install integration test dependencies
+        run: |
+          python -m pip install 'ansible-core>=2.18,<2.20' pytest pytest-testinfra
+          ansible-galaxy collection install community.docker
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run all tests, including native Ansible integration
+        run: cargo test --locked --all-targets -- --include-ignored
+
+      - name: Run Docker example with Ansible and pytest verification
+        run: cargo run --locked -- run --file examples/ansible-docker/cvd.yml
