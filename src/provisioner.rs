@@ -429,6 +429,17 @@ fn destroy_targets(scenario: &str, resources: &[Resource]) -> (serde_json::Value
     )
 }
 
+fn resources_by_type(resources: &[Resource]) -> BTreeMap<&str, Vec<&Resource>> {
+    let mut grouped = BTreeMap::new();
+    for resource in resources {
+        grouped
+            .entry(resource.resource_type.as_str())
+            .or_insert_with(Vec::new)
+            .push(resource);
+    }
+    grouped
+}
+
 #[cfg(test)]
 mod destroy_tests {
     use super::*;
@@ -573,15 +584,4 @@ mod destroy_tests {
         );
         assert_eq!(others[0].id, "malformed");
     }
-}
-
-fn resources_by_type(resources: &[Resource]) -> BTreeMap<&str, Vec<&Resource>> {
-    let mut grouped = BTreeMap::new();
-    for resource in resources {
-        grouped
-            .entry(resource.resource_type.as_str())
-            .or_insert_with(Vec::new)
-            .push(resource);
-    }
-    grouped
 }

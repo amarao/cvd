@@ -5,15 +5,24 @@ verifier: dummy
 
 scenarios:
   default:
+    dependency:
+      dummy:
+        status: ok
     create:
       dummy:
         status: ok
     prepare:
+      dummy:
+        status: ok
     converge:
       dummy:
         status: ok
     idempotence:
+      dummy:
+        status: ok
     cleanup:
+      dummy:
+        status: ok
     destroy:
       dummy:
         status: ok

@@ -1,5 +1,10 @@
 Work in progress.
 
+GitHub Actions runs on every push and pull request. CI checks Rust formatting,
+runs `cargo test --locked --all-targets -- --include-ignored` with Ansible and
+pytest/testinfra installed, and runs the Docker example with both verifiers.
+The workflow can also be started manually from the Actions tab.
+
 I want to have something better than Molecule and more flexible than Vagrant.
 
 Also, I want to handle VMs and kubernetes resources on equal ground.

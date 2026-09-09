@@ -8,6 +8,8 @@ use std::{io::Write, path::Path};
 use thiserror::Error;
 
 pub trait Converger {
+    // Keep lifecycle inputs and output controls explicit at the adapter boundary.
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &self,
         scenario_path: &str,

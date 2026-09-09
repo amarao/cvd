@@ -391,10 +391,10 @@ fn state_report_rejects_absent_unsafe_and_unknown_runs() {
 }
 
 #[test]
-fn full_dummy_example_runs_every_phase_successfully() {
-    let directory = test_directory("dummy-full");
+fn dummy_example_runs_every_phase_successfully() {
+    let directory = test_directory("dummy");
     let state_directory = directory.join("state");
-    let configuration = fs::canonicalize("examples/dummy-full/cvd.yml").unwrap();
+    let configuration = fs::canonicalize("examples/dummy/cvd.yml").unwrap();
     let output = run(&[
         "run",
         "--file",
@@ -413,7 +413,7 @@ fn full_dummy_example_runs_every_phase_successfully() {
             .join(last_run_id(&state_directory))
             .join("state.json"),
     );
-    let scenario = &state["scenarios"]["full-dummy-lifecycle"];
+    let scenario = &state["scenarios"]["default"];
     for phase in [
         "dependency",
         "create",
