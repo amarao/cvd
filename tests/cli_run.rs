@@ -1051,3 +1051,111 @@ fn directory_option_selects_yaml_and_state_without_requiring_config_for_inspecti
     assert!(String::from_utf8_lossy(&output.stderr).contains("cvd.yaml"));
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn ansible_verifier_receives_inventory_context_and_cleans_up_after_errors() {
+    for exit in [0, 2, 4] {
+        let directory = test_directory(&format!("ansible-verify-{exit}"));
+        let bin = directory.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for name in ["create.yml", "verify.yml", "inventory.yml"] {
+            fs::write(directory.join(name), "# fixture\n").unwrap();
+        }
+        let config = directory.join("cvd.yml");
+        fs::write(
+            &config,
+            r#"version: 1
+inventory: [inventory.yml]
+provisioner: ansible
+converger: dummy
+verifier: ansible
+scenarios:
+  root:
+    create:
+      ansible: {playbook: create.yml}
+    nested:
+      - name: child
+        verify:
+          check:
+            ansible: {playbook: verify.yml, vars: {expected: yes}}
+          later:
+            verifier: dummy
+        cleanup:
+    cleanup:
+    destroy:
+      ansible: {playbook: create.yml}
+"#,
+        )
+        .unwrap();
+        let script = bin.join("ansible-playbook");
+        fs::write(&script, r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+cvd = json.load(open(os.environ['CVD_INPUT_FILE']))['cvd']
+if cvd['action'] == 'create':
+    json.dump({'manifest_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': [{'id': 'web', 'type': 'container', 'attributes': {'ansible': {'inventory_hostname': 'web', 'vars': {'ansible_host': 'runtime-web'}}}}]}, open(cvd['result_file'], 'w'))
+elif cvd['action'] == 'verify':
+    assert cvd['scenario_selector'] == 'root/child'
+    assert cvd['vars']['expected'] == 'yes'
+    assert cvd['resources'][0]['id'] == 'web'
+    assert cvd['resources_by_type']['container'] == cvd['resources']
+    assert cvd['directory'] == os.getcwd()
+    sources = [sys.argv[i+1] for i, arg in enumerate(sys.argv) if arg == '--inventory']
+    assert sources[0] == str(pathlib.Path.cwd() / 'inventory.yml')
+    assert 'runtime-web' in pathlib.Path(sources[-1]).read_text()
+    pathlib.Path(os.environ['CVD_TEST_CAPTURE']).write_text('verified')
+    sys.exit(int(os.environ['CVD_TEST_EXIT']))
+"#).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let inspect = bin.join("ansible-inventory");
+        fs::write(
+            &inspect,
+            "#!/bin/sh\nprintf '%s\\n' '{\"all\":{\"hosts\":[\"web\"]}}'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&inspect, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut paths = vec![bin];
+        paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+        let state_dir = directory.join("state");
+        let capture = directory.join("capture");
+        let output = command(&[
+            "run",
+            "-f",
+            config.to_str().unwrap(),
+            "--state-dir",
+            state_dir.to_str().unwrap(),
+        ])
+        .env("PATH", env::join_paths(paths).unwrap())
+        .env("CVD_TEST_EXIT", exit.to_string())
+        .env("CVD_TEST_CAPTURE", &capture)
+        .output()
+        .unwrap();
+        assert_eq!(
+            output.status.success(),
+            exit == 0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_to_string(capture).unwrap(), "verified");
+        let state = load_state(
+            &state_dir
+                .join("runs")
+                .join(last_run_id(&state_dir))
+                .join("state.json"),
+        );
+        let child = &state["scenarios"]["root/child"];
+        assert_eq!(
+            child["test_results"][0]["status"],
+            if exit == 0 { "pass" } else { "error" }
+        );
+        assert_eq!(child["phases"]["cleanup"]["status"], "pass");
+        assert_eq!(
+            state["scenarios"]["root"]["phases"]["destroy"]["status"],
+            "pass"
+        );
+        if exit != 0 {
+            assert_eq!(child["test_results"].as_array().unwrap().len(), 1);
+            assert_eq!(state["primary_error"]["phase"], "verify");
+            assert_eq!(state["primary_error"]["scenario_path"], "root/child");
+        }
+    }
+}

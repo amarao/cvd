@@ -147,7 +147,7 @@ move the old `tests` mapping to `verify` and remove the old phase-only key.
 Provisioner, converger, and verifier defaults are declared at configuration
 top level. The current implementation supports `dummy` and `ansible`
 provisioners and convergers; an omitted provisioner defaults to `dummy`. The
-verifier supports `dummy` and `pytest` (including the pytest-testinfra plugin). The Ansible converger supports `prepare`,
+verifier supports `dummy`, `ansible`, and `pytest` (including the pytest-testinfra plugin). The Ansible converger supports `prepare`,
 `converge`, and `cleanup`; real idempotence checking remains deferred. The dummy provisioner returns one resource
 with ID and type `mock`, the dummy converger performs no action, and the dummy
 verifier passes every named test by default. Dummy phase adapter input accepts `status: ok|error`.
@@ -360,7 +360,7 @@ just a copy of its requested definition. The existing aggregate manifest
 protocol also applies to bindings; a reporting helper is not required.
 
 Before each Ansible `prepare`, `converge`, or `cleanup` invocation, and before
-each pytest test in `verify`, CVD generates
+each Ansible or pytest test in `verify`, CVD generates
 a private YAML inventory overlay from existing resources owned by that scenario
 and its ancestors. Unrelated siblings and destroyed resources are excluded.
 Ancestor resources precede child resources and each manifest's order is
@@ -381,8 +381,8 @@ not override higher-precedence variable sources such as extra vars.
 
 Create uses the original inventory and reports runtime data. Destroy uses its
 dedicated owned-host inventory and non-host resource list, regardless of
-current group membership. The overlay is shared by inventory-consuming converger phases and pytest
-verification. Ansible playbook verification and idempotence are not yet
+current group membership. The overlay is shared by inventory-consuming converger phases and Ansible/pytest
+verification. Ansible playbook verification is supported; idempotence is not yet
 implemented.
 
 Ansible converger phases require explicit `ansible: {playbook: ..., vars: ...}`
@@ -426,6 +426,31 @@ The canonical create result stays one ordered `resources` list. Playbooks may
 assemble typed lists and concatenate them when reporting actual created objects.
 The grouping is derived invocation input, not a new manifest or persisted-state
 schema. Resource records are identical in the flat and grouped representations.
+
+## Ansible verifier
+
+`verifier: ansible` selects Ansible playbooks for named tests; each test can
+also override the top-level verifier with `verifier: ansible`:
+
+```yaml
+verify:
+  service:
+    ansible:
+      playbook: verify.yml
+      vars:
+        expected_port: 8080
+```
+
+Playbooks resolve relative to the scenario's configuration file and run from
+the root configuration directory. They receive original inventory sources plus
+the scenario's runtime overlay, and the same `cvd` input as convergence:
+`cvd.action` is `verify`, `cvd.vars` holds the test's variables, and resources
+include existing visible ancestor and scenario resources. No result manifest
+is required. Exit zero means `pass`; any nonzero exit (including failed Ansible
+assertions), launch error, or inventory error means `error`. CVD retains the
+named test and scenario/verify provenance, stops later tests and children, and
+attempts normal cleanup and destruction. Dummy status controls and pytest
+options are rejected for Ansible tests.
 
 ## Pytest verifier
 

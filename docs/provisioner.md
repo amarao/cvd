@@ -184,3 +184,26 @@ they contain only owned non-host resources; inherited resources are excluded.
 The flat list keeps resource order, and each typed list preserves the relative
 order of its entries. Type names containing dots use dictionary access, such
 as `cvd.resources_by_type.get('docker.image', [])`.
+
+## Ansible verification
+
+Set `verifier: ansible` at the top level or on a named test:
+
+```yaml
+verify:
+  service:
+    verifier: ansible
+    ansible:
+      playbook: verify.yml
+      vars:
+        expected_port: 8080
+```
+
+Verification receives the original inventory plus the scenario's runtime
+inventory overlay. It also receives the same `cvd` variables as convergence,
+with `cvd.action: verify`, test inputs in `cvd.vars`, and all existing visible
+resources in `cvd.resources` and `cvd.resources_by_type`. Playbook paths resolve
+relative to the file declaring the scenario. No result file is required.
+A successful Ansible exit passes the test. Any nonzero exit, including an
+assertion failure, is an `error`: later tests and child scenarios stop, and
+normal cleanup and destruction are attempted.

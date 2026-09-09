@@ -251,7 +251,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         }
 
         for (test_name, test) in scenario.tests.iter() {
-            let inventory = if test.pytest.is_some() {
+            let inventory = if test.pytest.is_some() || test.ansible.is_some() {
                 crate::inventory::write_view(
                     &mut self.state,
                     path,
@@ -268,9 +268,13 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
                 Ok(None)
             };
             let result = match inventory {
-                Ok(inventory) => self
-                    .verifier
-                    .verify(path, test_name, test, inventory.as_deref()),
+                Ok(inventory) => self.verifier.verify(
+                    path,
+                    test_name,
+                    test,
+                    inventory.as_deref(),
+                    &self.state.visible_resources(path),
+                ),
                 Err(error) => Err(crate::verifier::VerifierError(error)),
             };
             match result {
@@ -1157,6 +1161,7 @@ scenarios:
             _test_name: &str,
             _: &crate::config::Test,
             _: Option<&std::path::Path>,
+            _: &[crate::state::Resource],
         ) -> Result<VerifierStatus, crate::verifier::VerifierError> {
             Ok(VerifierStatus::Error)
         }

@@ -27,7 +27,7 @@ use crate::{
     lifecycle::{LifecycleError, LifecycleRunner, render_state_report},
     provisioner::AnsibleProvisioner,
     state::{RunState, StateError, StateRepository, StateRepositoryError, default_state_directory},
-    verifier::PytestVerifier,
+    verifier::RuntimeVerifier,
 };
 
 #[derive(Debug, Error)]
@@ -123,8 +123,10 @@ fn run(args: RunArgs) -> Result<(), AppError> {
             .with_inventory(configuration.inventory.clone()),
         default_is_ansible: configuration.converger == "ansible",
     };
-    let verifier = PytestVerifier {
-        default_is_pytest: configuration.verifier == "pytest",
+    let verifier = RuntimeVerifier {
+        default_verifier: configuration.verifier.clone(),
+        ansible: AnsibleProvisioner::new(false, working_directory)
+            .with_inventory(configuration.inventory.clone()),
         working_directory: working_directory.to_owned(),
         inventory: inventory::AnsibleInventory::new(
             working_directory,

@@ -86,9 +86,11 @@ impl PhaseDefinition {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AnsiblePhaseDefinition {
     pub(crate) playbook: PathBuf,
+    #[serde(default = "empty_json_object")]
     pub(crate) vars: serde_json::Value,
 }
 
@@ -134,6 +136,8 @@ pub enum ConfiguredPhase {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Test {
+    #[serde(default)]
+    pub(crate) ansible: Option<AnsiblePhaseDefinition>,
     #[serde(default)]
     pub(crate) pytest: Option<PytestDefinition>,
     #[serde(default)]
@@ -428,7 +432,7 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         validate_default("provisioner", &self.provisioner, &["dummy", "ansible"])?;
         validate_default("converger", &self.converger, &["dummy", "ansible"])?;
-        validate_default("verifier", &self.verifier, &["dummy", "pytest"])?;
+        validate_default("verifier", &self.verifier, &["dummy", "pytest", "ansible"])?;
         validate_scenarios(self, &self.scenarios, None)
     }
 }
@@ -590,6 +594,24 @@ fn resolve_scenario(
     }
 
     for (name, test) in &mut tests.0 {
+        if let Some(ansible) = &mut test.ansible {
+            let target = base
+                .unwrap_or_else(|| Path::new("."))
+                .join(&ansible.playbook);
+            if !ansible.vars.is_object() || ansible.playbook.as_os_str().is_empty() {
+                return Err(ConfigError::InvalidTest {
+                    path: format!("{path}::{name}"),
+                    reason: "Ansible requires a nonempty playbook and vars mapping".to_owned(),
+                });
+            }
+            ansible.playbook = fs::canonicalize(&target)
+                .ok()
+                .filter(|p| p.is_file())
+                .ok_or_else(|| ConfigError::InvalidTest {
+                    path: format!("{path}::{name}"),
+                    reason: format!("playbook `{}` was not found", target.display()),
+                })?;
+        }
         if let Some(pytest) = &mut test.pytest {
             if pytest.path.as_os_str().is_empty() {
                 return Err(ConfigError::InvalidTest {
@@ -639,6 +661,19 @@ fn validate_scenarios(
             })?;
             let verifier = test.verifier.as_deref().unwrap_or(&config.verifier);
             let reason = match verifier {
+                _ if test.ansible.is_some() && verifier != "ansible" => {
+                    Some("Ansible options require the ansible verifier".to_owned())
+                }
+                "ansible" if test.pytest.is_some() => {
+                    Some("pytest options require the pytest verifier".to_owned())
+                }
+                "ansible" if test.ansible.is_none() => {
+                    Some("ansible verifier requires `ansible: {playbook: ...}`".to_owned())
+                }
+                "ansible" if test.status != DummyStatus::Ok => {
+                    Some("dummy status controls cannot be used with ansible".to_owned())
+                }
+                "ansible" => None,
                 "dummy" if test.pytest.is_some() => {
                     Some("pytest options require the pytest verifier".to_owned())
                 }
@@ -857,6 +892,53 @@ scenarios:
     verify:
     destroy:
 "#;
+
+    #[test]
+    fn validates_ansible_verifier_options() {
+        let root = std::env::temp_dir().join(format!("cvd-verify-config-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("verify.yml"), "---\n").unwrap();
+        let base = "version: 1\nconverger: dummy\nverifier: ansible\nscenarios:\n  root:\n    verify:\n      check:\n";
+        let valid = format!("{base}        ansible: {{playbook: verify.yml}}\n");
+        let config = Config::from_yaml_at(&valid, &root.join("cvd.yml")).unwrap();
+        let test = config
+            .scenario("root")
+            .unwrap()
+            .tests
+            .iter()
+            .next()
+            .unwrap()
+            .1;
+        assert_eq!(
+            test.ansible.as_ref().unwrap().playbook,
+            root.join("verify.yml")
+        );
+        assert!(test.ansible.as_ref().unwrap().vars.is_object());
+        for invalid in [
+            format!("{base}        status: ok\n"),
+            valid.replace("verify.yml", "missing.yml"),
+            valid.replace("playbook: verify.yml", "playbook: verify.yml, vars: []"),
+            valid.replace(
+                "playbook: verify.yml",
+                "playbook: verify.yml, unknown: true",
+            ),
+            format!("{valid}        status: fail\n"),
+            format!("{valid}        verifier: dummy\n"),
+        ] {
+            assert!(
+                Config::from_yaml_at(&invalid, &root.join("cvd.yml")).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(
+            Config::from_yaml_at(
+                &format!("{valid}        verifier: ansible\n")
+                    .replace("verifier: ansible\nscenarios", "verifier: dummy\nscenarios"),
+                &root.join("cvd.yml")
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn parses_phase_payloads_tests_and_ordered_nested_scenarios() {

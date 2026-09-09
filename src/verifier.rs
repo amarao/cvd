@@ -1,4 +1,4 @@
-//! Named dummy and pytest verifier invocations.
+//! Named dummy, Ansible, and pytest verifier invocations.
 
 use std::{
     path::{Path, PathBuf},
@@ -19,6 +19,7 @@ pub trait Verifier {
         test_name: &str,
         test: &Test,
         inventory: Option<&Path>,
+        resources: &[crate::state::Resource],
     ) -> Result<VerifierStatus, VerifierError>;
 }
 
@@ -33,6 +34,7 @@ impl Verifier for DummyVerifier {
         _test_name: &str,
         test: &Test,
         _inventory: Option<&Path>,
+        _resources: &[crate::state::Resource],
     ) -> Result<VerifierStatus, VerifierError> {
         Ok(match test.status {
             DummyStatus::Ok => VerifierStatus::Pass,
@@ -47,26 +49,39 @@ impl Verifier for DummyVerifier {
 pub struct VerifierError(pub String);
 
 /// Pytest also runs testinfra when its plugin is installed in the selected environment.
-pub struct PytestVerifier {
-    pub default_is_pytest: bool,
+pub struct RuntimeVerifier {
+    pub default_verifier: String,
+    pub ansible: crate::provisioner::AnsibleProvisioner,
     pub working_directory: PathBuf,
     pub inventory: crate::inventory::AnsibleInventory,
 }
 
-impl Verifier for PytestVerifier {
+impl Verifier for RuntimeVerifier {
     fn verify(
         &self,
         scenario_path: &str,
         test_name: &str,
         test: &Test,
         overlay: Option<&Path>,
+        resources: &[crate::state::Resource],
     ) -> Result<VerifierStatus, VerifierError> {
-        let selected = test
-            .verifier
-            .as_deref()
-            .map_or(self.default_is_pytest, |name| name == "pytest");
-        if !selected {
-            return DummyVerifier.verify(scenario_path, test_name, test, overlay);
+        let selected = test.verifier.as_deref().unwrap_or(&self.default_verifier);
+        if selected == "ansible" {
+            let definition = test
+                .ansible
+                .as_ref()
+                .ok_or_else(|| VerifierError("ansible verifier requires a playbook".to_owned()))?;
+            self.ansible
+                .converge(scenario_path, "verify", definition, overlay, resources)
+                .map_err(|error| {
+                    VerifierError(format!(
+                        "Ansible test `{scenario_path}::{test_name}`: {error}"
+                    ))
+                })?;
+            return Ok(VerifierStatus::Pass);
+        }
+        if selected == "dummy" {
+            return DummyVerifier.verify(scenario_path, test_name, test, overlay, resources);
         }
         let pytest = test
             .pytest
