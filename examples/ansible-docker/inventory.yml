@@ -2,8 +2,6 @@
 all:
   children:
     cvd_managed:
-      vars:
-        container_image: alpine:3.20
       hosts:
         web: {}
     webservers:

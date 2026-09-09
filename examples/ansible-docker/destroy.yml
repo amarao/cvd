@@ -18,12 +18,12 @@
         - docker_remove.rc != 0
         - "'No such container' not in docker_remove.stderr"
 
-- name: Purge cached images after removing the containers
+- name: Remove built images after removing the containers
   hosts: localhost
   connection: local
   gather_facts: false
   tasks:
-    - name: Remove the recorded cached image
+    - name: Remove the recorded built image
       ansible.builtin.command:
         argv: [docker, image, rm, "{{ item.id }}"]
       loop: "{{ cvd.resources_by_type.get('docker.image', []) }}"

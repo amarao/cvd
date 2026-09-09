@@ -2,7 +2,7 @@
 
 `inventory.yml` declares hosts, group memberships, and group variables using
 ordinary Ansible syntax. Add hosts to `cvd_managed` to create more containers;
-change `container_image` per host or group. The create playbook is reusable and
+change the base image in `Dockerfile`. The create playbook is reusable and
 knows nothing about application groups such as `webservers`.
 
 Requirements: `ansible-playbook`, `ansible-inventory`, Docker access, and the
@@ -13,20 +13,25 @@ Requirements: `ansible-playbook`, `ansible-inventory`, Docker access, and the
 cargo run -- run --file examples/ansible-docker/cvd.yml
 ```
 
-Create first pulls each distinct `container_image` into the local Docker cache
-and records its actual image ID as a `docker.image` resource. Images have no
-Ansible host binding, so they are passed to destroy in `cvd.resources` and grouped under
-`cvd.resources_by_type['docker.image']`. Hosts
-sharing an image share one image resource. This example takes ownership of the
-cached image even if it was already present, and purges it during destroy.
-Image removal does not use force: Docker can refuse removal when another
-container or additional tags still reference it, making destroy fail.
+Create first builds the local `Dockerfile` (`FROM alpine:3.20`) and tags the
+result `cvd-example:<invocation_id>`. A build-time invocation label gives it a
+separate image ID even though the Dockerfile only contains `FROM`. This keeps
+the base image and other runs' images outside this scenario's ownership.
+All managed containers share the built image.
+
+The built image's actual ID is recorded as a `docker.image` resource with its
+tag in `attributes.reference`. It has no Ansible host binding, so destroy
+receives it in `cvd.resources` and `cvd.resources_by_type['docker.image']`.
+Destroy removes the containers first, then removes the built image by ID
+without force. The base image and Docker build cache remain available.
 
 Create then reports each actual container ID with an
 `attributes.ansible` binding to its inventory hostname. CVD persists those
 resources and generates a private runtime inventory overlay before converge.
 Ansible loads the original inventory first and the overlay last, retaining
-normal group variables and connection-variable precedence. Converge targets
+normal group variables and connection-variable precedence. Prepare checks that
+each web container is reachable and `/tmp` is writable, then removes any old
+greeting file. Converge targets
 `webservers` through the discovered Docker connection, using `raw` because the
 Alpine image has no Python. The named `greeting_ansible` test overrides the
 default verifier with `ansible` and runs `verify.yml` against the same inventory.
@@ -37,7 +42,10 @@ group with `testinfra_hosts = ["ansible://webservers"]`; pytest arguments
 only control reporting. CVD sets `ANSIBLE_INVENTORY`
 to the original sources followed by the runtime overlay; testinfra's Ansible
 backend reads it without an inventory CLI argument. Destroy removes only
-persisted owned container IDs, then purges the recorded image IDs.
+persisted owned container IDs, then purges the recorded image IDs. Before
+destroy, cleanup removes `/tmp/cvd-greeting` if it exists, including after
+verification errors. Prepare and cleanup use `raw` so they need no Python in
+the container; removal reports a change only when the file existed.
 
 The Ansible test supplies `ansible.playbook`; the pytest test supplies
 `pytest.path` and optional `pytest.args` passed literally to `pytest`. Both
@@ -54,7 +62,8 @@ use the project's `ansible.cfg` or `ANSIBLE_INVENTORY`; CVD preserves those
 sources when adding its overlay. Original source paths remain intact, so
 Ansible can load adjacent `group_vars` and `host_vars` files.
 
-Use `--keep` to retain containers and cached images. The persisted scenario's
+Use `--keep` to retain containers and built images. Cleanup still runs, so the
+greeting file is removed even when containers are retained. The persisted scenario's
 `views.ansible_inventory.attributes.path` points to the generated overlay.
 The overlay is a record of that invocation; after destroy it is not a list of
 currently existing containers. Resource state records destruction separately.

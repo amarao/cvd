@@ -1,39 +1,38 @@
 ---
-- name: Cache the images required by managed hosts
+- name: Build an image owned by this scenario invocation
   hosts: localhost
   connection: local
   gather_facts: false
-  vars:
-    required_images: "{{ groups['cvd_managed'] | map('extract', hostvars, 'container_image') | unique | list }}"
   tasks:
-    # We pretend this pulled image is a resource we create/destroy
-    - name: Pull each required image
-      ansible.builtin.command:
-        argv: [docker, image, pull, "{{ item }}"]
-      loop: "{{ required_images }}"
-      register: image_pull
-      changed_when: "'Downloaded newer image' in image_pull.stdout"
+    - name: Choose a unique image reference
+      ansible.builtin.set_fact:
+        cvd_image_reference: "cvd-example:{{ cvd.invocation_id }}"
 
-    - name: Inspect the cached images
+    - name: Build the example image
       ansible.builtin.command:
-        argv: [docker, image, inspect, "{{ item }}"]
-      loop: "{{ required_images }}"
+        argv:
+          - docker
+          - build
+          - --tag
+          - "{{ cvd_image_reference }}"
+          - --label
+          - "cvd.invocation_id={{ cvd.invocation_id }}"
+          - "{{ playbook_dir }}"
+      changed_when: true
+
+    - name: Inspect the built image
+      ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ cvd_image_reference }}"]
       register: image_inspect
       changed_when: false
 
-    - name: Initialize image resources
+    - name: Record the image as a non-host resource
       ansible.builtin.set_fact:
-        cvd_images: []
-
-    - name: Record actual image IDs as non-host resources
-      ansible.builtin.set_fact:
-        cvd_images: >-
-          {{ cvd_images + [{'id': (item.stdout | from_json)[0].Id,
-                            'type': 'docker.image',
-                            'attributes': {'reference': item.item}}] }}
-      loop: "{{ image_inspect.results }}"
-      loop_control:
-        label: "{{ item.item }}"
+        cvd_images:
+          - id: "{{ (image_inspect.stdout | from_json)[0].Id }}"
+            type: docker.image
+            attributes:
+              reference: "{{ cvd_image_reference }}"
 
 - name: Create containers declared in the managed inventory group
   hosts: cvd_managed
@@ -48,7 +47,7 @@
           - --detach
           - --name
           - "cvd-{{ inventory_hostname }}-{{ cvd.invocation_id }}"
-          - "{{ container_image }}"
+          - "{{ hostvars['localhost'].cvd_image_reference }}"
           - sleep
           - infinity
       register: docker_run
@@ -71,7 +70,7 @@
   connection: local
   gather_facts: false
   tasks:
-    - name: Publish containers and cached images atomically
+    - name: Publish containers and the built image atomically
       ansible.builtin.copy:
         dest: "{{ cvd.result_file }}"
         mode: "0600"

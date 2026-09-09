@@ -9,6 +9,9 @@ scenarios:
     create:
       ansible:
         playbook: create.yml
+    prepare:
+      ansible:
+        playbook: prepare.yml
     converge:
       ansible:
         playbook: converge.yml
@@ -21,6 +24,9 @@ scenarios:
         pytest:
           path: tests/test_web.py
           args: ["-v"]
+    cleanup:
+      ansible:
+        playbook: cleanup.yml
     destroy:
       ansible:
         playbook: destroy.yml
