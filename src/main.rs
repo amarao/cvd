@@ -21,7 +21,10 @@ use clap::Parser;
 use thiserror::Error;
 
 use crate::{
-    cli::{Cli, Command, RunArgs, StateReportArgs, StateResourcesArgs, StateViewArgs, ViewFormat},
+    cli::{
+        Cli, Command, RunArgs, StateReportArgs, StateResourcesArgs, StateViewArgs, SyntaxCheckArgs,
+        ViewFormat,
+    },
     config::Config,
     converger::AnsibleConverger,
     lifecycle::{LifecycleError, LifecycleRunner, render_state_report},
@@ -73,16 +76,23 @@ fn run_cli() -> Result<(), AppError> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => run(args),
+        Command::SyntaxCheck(args) => syntax_check(args),
         Command::StateView(args) => state_view(args),
         Command::StateResources(args) => state_resources(args),
         Command::StateReport(args) => state_report(args),
     }
 }
 
-fn run(args: RunArgs) -> Result<(), AppError> {
+fn syntax_check(args: SyntaxCheckArgs) -> Result<(), AppError> {
     let file = cli::configuration_file(&args.file, args.directory.as_deref());
-    let configuration_path = fs::canonicalize(&file).map_err(|source| AppError::Canonicalize {
-        path: file.clone(),
+    let (configuration_path, _) = load_configuration(&file)?;
+    println!("configuration `{}` is valid", configuration_path.display());
+    Ok(())
+}
+
+fn load_configuration(file: &std::path::Path) -> Result<(PathBuf, Config), AppError> {
+    let configuration_path = fs::canonicalize(file).map_err(|source| AppError::Canonicalize {
+        path: file.to_owned(),
         source,
     })?;
     let configuration_text =
@@ -91,6 +101,12 @@ fn run(args: RunArgs) -> Result<(), AppError> {
             source,
         })?;
     let configuration = Config::from_yaml_at(&configuration_text, &configuration_path)?;
+    Ok((configuration_path, configuration))
+}
+
+fn run(args: RunArgs) -> Result<(), AppError> {
+    let file = cli::configuration_file(&args.file, args.directory.as_deref());
+    let (configuration_path, configuration) = load_configuration(&file)?;
     let repository = StateRepository::new(
         args.state_dir
             .unwrap_or_else(|| default_state_directory(&configuration_path)),

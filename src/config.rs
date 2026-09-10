@@ -324,6 +324,8 @@ where
 pub enum ConfigError {
     #[error("invalid configuration: {0}")]
     Parse(#[from] serde_yaml::Error),
+    #[error("invalid CVD configuration: {reason}")]
+    InvalidDocument { reason: &'static str },
     #[error("unsupported configuration version {found}; supported version is {CONFIG_VERSION}")]
     UnsupportedVersion { found: u32 },
     #[error("invalid top-level {kind}: {reason}")]
@@ -361,6 +363,15 @@ impl Config {
     }
 
     fn from_yaml_with_base(input: &str, base: Option<&Path>) -> Result<Self, ConfigError> {
+        let document: serde_yaml::Value = serde_yaml::from_str(input)?;
+        if !document.is_mapping() {
+            let reason = if document.is_sequence() {
+                "expected a mapping at the document root, but found a sequence."
+            } else {
+                "expected a mapping at the document root with `version`, `converger`, `verifier`, and `scenarios` keys"
+            };
+            return Err(ConfigError::InvalidDocument { reason });
+        }
         let raw: RawConfig = serde_yaml::from_str(input)?;
         if raw.version != CONFIG_VERSION {
             return Err(ConfigError::UnsupportedVersion { found: raw.version });

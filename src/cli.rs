@@ -18,12 +18,25 @@ pub struct Cli {
 pub enum Command {
     /// Run a scenario or a scenario subtree.
     Run(RunArgs),
+    /// Validate configuration syntax and referenced files without running it.
+    SyntaxCheck(SyntaxCheckArgs),
     /// Render a persisted state view for a previous run.
     StateView(StateViewArgs),
     /// List resources recorded for a previous run.
     StateResources(StateResourcesArgs),
     /// Replay a persisted run report.
     StateReport(StateReportArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SyntaxCheckArgs {
+    /// Scenario configuration file.
+    #[arg(short = 'f', long, default_value = "cvd.yml", value_name = "FILE")]
+    pub file: PathBuf,
+
+    /// Directory containing cvd.yaml or cvd.yml (alternative to --file).
+    #[arg(short = 'F', long, value_name = "DIR", conflicts_with = "file")]
+    pub directory: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -36,7 +49,7 @@ pub struct RunArgs {
     #[arg(short = 'f', long, default_value = "cvd.yml", value_name = "FILE")]
     pub file: PathBuf,
 
-    /// Directory containing cvd.yaml (alternative to --file).
+    /// Directory containing cvd.yaml or cvd.yml (alternative to --file).
     #[arg(short = 'F', long, value_name = "DIR", conflicts_with = "file")]
     pub directory: Option<PathBuf>,
 
@@ -69,7 +82,7 @@ pub struct StateViewArgs {
     #[arg(short = 'f', long, default_value = "cvd.yml", value_name = "FILE")]
     pub file: PathBuf,
 
-    /// Directory containing cvd.yaml (alternative to --file).
+    /// Directory containing cvd.yaml or cvd.yml (alternative to --file).
     #[arg(short = 'F', long, value_name = "DIR", conflicts_with = "file")]
     pub directory: Option<PathBuf>,
 
@@ -92,7 +105,7 @@ pub struct StateResourcesArgs {
     #[arg(short = 'f', long, default_value = "cvd.yml", value_name = "FILE")]
     pub file: PathBuf,
 
-    /// Directory containing cvd.yaml (alternative to --file).
+    /// Directory containing cvd.yaml or cvd.yml (alternative to --file).
     #[arg(short = 'F', long, value_name = "DIR", conflicts_with = "file")]
     pub directory: Option<PathBuf>,
 
@@ -111,7 +124,7 @@ pub struct StateReportArgs {
     #[arg(short = 'f', long, default_value = "cvd.yml", value_name = "FILE")]
     pub file: PathBuf,
 
-    /// Directory containing cvd.yaml (alternative to --file).
+    /// Directory containing cvd.yaml or cvd.yml (alternative to --file).
     #[arg(short = 'F', long, value_name = "DIR", conflicts_with = "file")]
     pub directory: Option<PathBuf>,
 
@@ -121,7 +134,18 @@ pub struct StateReportArgs {
 }
 
 pub fn configuration_file(file: &std::path::Path, directory: Option<&std::path::Path>) -> PathBuf {
-    directory.map_or_else(|| file.to_owned(), |directory| directory.join("cvd.yaml"))
+    let Some(directory) = directory else {
+        return file.to_owned();
+    };
+    let yaml = directory.join("cvd.yaml");
+    if yaml.is_file() {
+        return yaml;
+    }
+    let yml = directory.join("cvd.yml");
+    if yml.is_file() {
+        return yml;
+    }
+    yaml
 }
 
 #[cfg(test)]
@@ -132,10 +156,17 @@ mod tests {
 
     #[test]
     fn directory_option_is_available_on_all_commands_and_conflicts_with_file() {
-        for command in ["run", "state-view", "state-resources", "state-report"] {
+        for command in [
+            "run",
+            "syntax-check",
+            "state-view",
+            "state-resources",
+            "state-report",
+        ] {
             let parsed = Cli::try_parse_from(["cvd", command, "-F", "project"]).unwrap();
             let (file, directory) = match parsed.command {
                 Command::Run(args) => (args.file, args.directory),
+                Command::SyntaxCheck(args) => (args.file, args.directory),
                 Command::StateView(args) => (args.file, args.directory),
                 Command::StateResources(args) => (args.file, args.directory),
                 Command::StateReport(args) => (args.file, args.directory),
@@ -149,6 +180,22 @@ mod tests {
             );
             assert!(Cli::try_parse_from(["cvd", command, "-F"]).is_err());
         }
+    }
+
+    #[test]
+    fn parses_syntax_check_with_defaults_and_file_selection() {
+        let cli = Cli::try_parse_from(["cvd", "syntax-check"]).unwrap();
+        let Command::SyntaxCheck(check) = cli.command else {
+            panic!("expected syntax-check command");
+        };
+        assert_eq!(check.file.to_string_lossy(), "cvd.yml");
+        assert_eq!(check.directory, None);
+
+        let cli = Cli::try_parse_from(["cvd", "syntax-check", "--file", "scenario.yml"]).unwrap();
+        let Command::SyntaxCheck(check) = cli.command else {
+            panic!("expected syntax-check command");
+        };
+        assert_eq!(check.file.to_string_lossy(), "scenario.yml");
     }
 
     #[test]

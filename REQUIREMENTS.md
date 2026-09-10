@@ -631,6 +631,15 @@ with `NO_COLOR` set contain no ANSI styling.
 does not execute lifecycle actions or parse the current configuration, and it
 reports persisted `pending` or `running` phase states without retrying them.
 
+`syntax-check` loads and validates a CVD configuration without executing any
+lifecycle action or creating run state. It validates the configuration schema
+and all referenced inventory sources, scenario includes, Ansible playbooks, and
+pytest paths. A valid configuration exits with status 0; any invalid syntax,
+schema, or missing referenced file produces an error and a nonzero status.
+For every command, directory selection discovers either `cvd.yaml` or `cvd.yml`,
+preferring `cvd.yaml` when both are present. Explicit file selection uses the
+exact supplied path.
+
 ## Initial non-goals
 
 The initial version does not require:

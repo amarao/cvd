@@ -44,6 +44,57 @@ fn last_run_id(state_directory: &Path) -> String {
 }
 
 #[test]
+fn syntax_check_validates_configuration_and_referenced_files_without_running() {
+    let directory = test_directory("syntax-check");
+    fs::create_dir_all(&directory).unwrap();
+    let configuration = directory.join("cvd.yml");
+    let playbook = directory.join("create.yml");
+    fs::write(&playbook, "---\n").unwrap();
+    fs::write(
+        &configuration,
+        "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  default:\n    create:\n      ansible:\n        playbook: create.yml\n",
+    )
+    .unwrap();
+
+    let output = run(&["syntax-check", "-F", directory.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("is valid"));
+    assert!(!directory.join(".cvd").exists());
+
+    fs::remove_file(&playbook).unwrap();
+    let output = run(&["syntax-check", "--file", configuration.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("playbook"));
+    assert!(!directory.join(".cvd").exists());
+
+    fs::write(&configuration, "not: valid: yaml\n").unwrap();
+    let output = run(&["syntax-check", "--file", configuration.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid configuration"));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn syntax_check_explains_when_an_ansible_playbook_is_selected() {
+    let output = run(&[
+        "syntax-check",
+        "--file",
+        "examples/ansible-docker/create.yml",
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("expected a mapping at the document root, but found a sequence"));
+    assert!(stderr.contains("this may be an Ansible playbook"));
+    assert!(stderr.contains("select cvd.yaml or cvd.yml instead"));
+}
+
+#[test]
 fn nested_selector_runs_ancestor_chain_and_selected_subtree() {
     let directory = test_directory("nested-selector");
     let configuration = fixture_config(&directory);
@@ -1020,7 +1071,8 @@ fn directory_option_selects_yaml_and_state_without_requiring_config_for_inspecti
     fs::create_dir_all(&directory).unwrap();
     let config = directory.join("cvd.yaml");
     fs::write(&config, "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  selected:\n    create:\n    destroy:\n").unwrap();
-    fs::write(directory.join("cvd.yml"), "invalid: must not be selected\n").unwrap();
+    let yml_config = directory.join("cvd.yml");
+    fs::write(&yml_config, "invalid: must not be selected\n").unwrap();
     let output = run(&["run", "-F", directory.to_str().unwrap()]);
     assert!(
         output.status.success(),
@@ -1039,6 +1091,17 @@ fn directory_option_selects_yaml_and_state_without_requiring_config_for_inspecti
         fs::canonicalize(&config).unwrap().to_str().unwrap()
     );
     fs::remove_file(config).unwrap();
+    fs::write(
+        &yml_config,
+        "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  selected:\n    create:\n    destroy:\n",
+    )
+    .unwrap();
+    let output = run(&["run", "-F", directory.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     for subcommand in ["state-view", "state-resources", "state-report"] {
         assert!(
             run(&[subcommand, "--directory", directory.to_str().unwrap()])
@@ -1046,9 +1109,6 @@ fn directory_option_selects_yaml_and_state_without_requiring_config_for_inspecti
                 .success()
         );
     }
-    let output = run(&["run", "-F", directory.to_str().unwrap()]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("cvd.yaml"));
     fs::remove_dir_all(directory).unwrap();
 }
 
