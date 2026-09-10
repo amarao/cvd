@@ -1046,7 +1046,10 @@ scenarios:
             })
         ));
         for phase in ["prepare", "cleanup"] {
-            let yaml = yaml.replace("    converge:", &format!("    {phase}:"));
+            let existing = format!("    {phase}:\n      ansible:\n        playbook: {phase}.yml\n");
+            let yaml = yaml
+                .replace(&existing, "")
+                .replace("    converge:", &format!("    {phase}:"));
             Config::from_yaml_at(&yaml, &path).unwrap();
         }
         for phase in ["verify", "idempotence", "dependency"] {
