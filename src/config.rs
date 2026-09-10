@@ -366,7 +366,7 @@ impl Config {
         let document: serde_yaml::Value = serde_yaml::from_str(input)?;
         if !document.is_mapping() {
             let reason = if document.is_sequence() {
-                "expected a mapping at the document root, but found a sequence."
+                "expected a mapping at the document root, but found a sequence; this may be an Ansible playbook, so select cvd.yaml or cvd.yml instead."
             } else {
                 "expected a mapping at the document root with `version`, `converger`, `verifier`, and `scenarios` keys"
             };

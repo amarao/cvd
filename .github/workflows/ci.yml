@@ -45,5 +45,8 @@ jobs:
       - name: Run all tests, including native Ansible integration
         run: cargo test --locked --all-targets -- --include-ignored
 
+      - name: Run syntax-check integration tests
+        run: cargo test --locked --test syntax_check
+
       - name: Run Docker example with Ansible and pytest verification
         run: cargo run --locked -- run --file examples/ansible-docker/cvd.yml
