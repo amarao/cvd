@@ -4,6 +4,7 @@ use crate::state::{LifecyclePhase, Resource, ResourceLocation, RunState};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     fs,
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -251,6 +252,25 @@ mod tests {
 #[error("{0}")]
 pub(crate) struct InventoryError(pub String);
 
+/// Append source paths to Ansible's comma-separated inventory environment.
+pub(crate) fn inventory_environment(
+    mut value: OsString,
+    sources: &[PathBuf],
+) -> Result<OsString, InventoryError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    for source in sources {
+        if source.as_os_str().as_bytes().contains(&b',') {
+            return Err(InventoryError("inventory source paths containing commas cannot be passed through ANSIBLE_INVENTORY".to_owned()));
+        }
+        if !value.is_empty() && !value.as_bytes().ends_with(b",") {
+            value.push(",");
+        }
+        value.push(source);
+    }
+    Ok(value)
+}
+
 /// Shared source resolution for Ansible and pytest/testinfra invocations.
 #[derive(Debug)]
 pub(crate) struct AnsibleInventory {
@@ -308,41 +328,24 @@ impl AnsibleInventory {
         command: &mut std::process::Command,
         overlay: Option<&Path>,
     ) -> Result<(), InventoryError> {
-        // With no override, let Ansible use its normal default selection.
-        let sources = if overlay.is_some() {
-            self.resolved_sources()?
-        } else {
-            self.sources.clone()
-        };
-        for source in sources {
-            command.arg("--inventory").arg(source);
-        }
-        if let Some(overlay) = overlay {
-            command.arg("--inventory").arg(overlay);
+        // With no additions, let Ansible use its normal default selection.
+        if !self.sources.is_empty() || overlay.is_some() {
+            command.env("ANSIBLE_INVENTORY", self.environment(overlay)?);
         }
         Ok(())
     }
 
-    pub(crate) fn environment(
-        &self,
-        overlay: Option<&Path>,
-    ) -> Result<std::ffi::OsString, InventoryError> {
-        use std::os::unix::ffi::OsStrExt;
-        let mut sources = self.resolved_sources()?;
+    pub(crate) fn environment(&self, overlay: Option<&Path>) -> Result<OsString, InventoryError> {
+        let inherited = std::env::var_os("ANSIBLE_INVENTORY").unwrap_or_default();
+        let mut sources = if inherited.is_empty() {
+            self.resolved_sources()?
+        } else {
+            self.sources.clone()
+        };
         if let Some(overlay) = overlay {
             sources.push(overlay.to_owned());
         }
-        let mut value = std::ffi::OsString::new();
-        for (index, source) in sources.iter().enumerate() {
-            if source.as_os_str().as_bytes().contains(&b',') {
-                return Err(InventoryError("inventory source paths containing commas cannot be passed through ANSIBLE_INVENTORY".to_owned()));
-            }
-            if index > 0 {
-                value.push(",");
-            }
-            value.push(source);
-        }
-        Ok(value)
+        inventory_environment(inherited, &sources)
     }
 
     pub(crate) fn validate_bindings(

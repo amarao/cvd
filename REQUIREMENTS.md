@@ -170,11 +170,27 @@ converger: ansible
 verifier: dummy
 ```
 
-Without explicit sources, Ansible's existing configuration and environment
-select the inventory. Before appending a runtime source, CVD asks
-`ansible-config dump --format json` for `DEFAULT_HOST_LIST` so the added source
-does not replace configured inventory. Original source locations are retained;
-CVD does not copy or flatten them, preserving adjacent variable-file discovery.
+CVD passes inventory through the subprocess's comma-separated
+`ANSIBLE_INVENTORY`, without inventory CLI arguments. Existing
+`ANSIBLE_INVENTORY` sources come first, followed by top-level `inventory`
+sources in declaration order, then the runtime overlay when present. Explicit
+CVD sources append to the inherited environment so projects can combine
+externally selected inventories with scenario-specific inventories. An unset
+or empty environment value adds no prefix.
+
+When neither inherited nor explicit sources are present, Ansible's existing
+configuration selects the inventory. Before appending a runtime source, CVD
+asks `ansible-config dump --format json` for `DEFAULT_HOST_LIST` so the added
+source does not replace configured inventory. With explicit CVD sources and
+no inherited sources, only the explicit sources and optional overlay are used.
+Original source locations are retained; CVD does not copy or flatten them,
+preserving adjacent variable-file discovery. CVD-added inventory paths
+containing commas are rejected because the environment variable cannot
+represent them unambiguously. Only subprocess environments are changed.
+
+Destroy sets `ANSIBLE_INVENTORY` to its dedicated owned-host inventory alone.
+It does not append inherited, configured, or runtime-overlay sources, preserving
+the rule that destruction targets come exclusively from recorded ownership.
 
 A reusable create playbook can target `cvd_managed` with `connection: local`
 and `gather_facts: false`. Host provisioning playbooks target this group by
@@ -312,10 +328,11 @@ The test's verifier must be `pytest` to accept pytest options; dummy status
 controls do not configure pytest results. No testinfra flags or host selection
 are injected automatically; ordinary pytest tests are also supported.
 
-CVD sets `ANSIBLE_INVENTORY` for each pytest process to the comma-separated
-original inventory sources followed by the scenario's runtime overlay, if any.
-Ansible defaults are resolved through `ansible-config` when explicit sources
-are absent. Original sources remain at their own paths, retaining group and
+CVD sets `ANSIBLE_INVENTORY` for each pytest process using the same source order
+as Ansible playbooks: inherited environment sources, explicit CVD sources,
+then the scenario's runtime overlay, if any. Ansible defaults are resolved
+through `ansible-config` when inherited and explicit sources are absent.
+Original sources remain at their own paths, retaining group and
 host variable files. Testinfra's `ansible://` backend consumes this environment
 variable through Ansible; tests need no inventory CLI argument. Inventory
 source paths containing commas are rejected because this environment variable

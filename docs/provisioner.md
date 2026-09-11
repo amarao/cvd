@@ -42,9 +42,27 @@ from inventory or creation input.
 
 Playbook paths are relative to the scenario file. CVD runs playbooks from the
 root configuration directory. Playbook paths must exist when configuration is
-loaded. Create uses the original inventory selected by CVD configuration or
-Ansible defaults. Destroy uses a dedicated inventory of recorded owned hosts. Ansible configuration
-still applies. Each phase may have its own optional `vars` section.
+loaded. Create uses the original inventory sources. CVD passes inventory using
+the subprocess's `ANSIBLE_INVENTORY` environment variable, without inventory
+CLI arguments. The comma-separated list contains inherited
+`ANSIBLE_INVENTORY` sources first, CVD's top-level `inventory` paths next, and
+the generated runtime overlay last for phases that consume it. For example:
+
+```text
+ANSIBLE_INVENTORY=/project/external.yml,/project/inventory.yml,/run/views/7363656e6172696f/ansible-inventory.yml
+```
+
+Appending preserves externally selected inventories while allowing CVD to add
+scenario sources and discovered host variables. Without inherited or explicit
+sources, Ansible defaults apply; CVD resolves those defaults with
+`ansible-config` before adding an overlay. Explicit CVD sources replace config
+file defaults when no environment sources are inherited. CVD-added source
+paths containing commas are rejected. An empty inherited value adds no prefix.
+The parent process environment is not modified.
+
+Destroy sets `ANSIBLE_INVENTORY` to a dedicated inventory of recorded owned
+hosts alone, preserving ownership isolation. Ansible configuration still
+applies. Each phase may have its own optional `vars` section.
 
 `cvd` and the `cvd_` prefix are reserved; do not set or modify them.
 

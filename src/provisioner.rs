@@ -181,7 +181,9 @@ impl AnsibleProvisioner {
             let data = serde_yaml::to_string(&destroy_inventory)
                 .map_err(|error| ProvisionerError(error.to_string()))?;
             fs::write(&path, data).map_err(|error| ProvisionerError(error.to_string()))?;
-            command.arg("--inventory").arg(path);
+            let inventory = crate::inventory::inventory_environment(Default::default(), &[path])
+                .map_err(|error| ProvisionerError(error.to_string()))?;
+            command.env("ANSIBLE_INVENTORY", inventory);
         } else {
             self.inventory
                 .apply(&mut command, overlay)

@@ -28,7 +28,7 @@ fn run(arguments: &[&str]) -> std::process::Output {
 
 fn command(arguments: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cvd"));
-    command.args(arguments);
+    command.args(arguments).env_remove("ANSIBLE_INVENTORY");
     command
 }
 
@@ -663,10 +663,13 @@ fi
 fn ansible_inventory_overlay_preserves_sources_and_cleanup_after_errors() {
     for mode in [
         "pass",
+        "inherited",
+        "empty",
         "converge-error",
         "unknown-host",
         "duplicate",
         "malformed",
+        "comma-overlay",
         "keep",
     ] {
         let directory = test_directory(&format!("inventory-{mode}"));
@@ -682,6 +685,34 @@ fn ansible_inventory_overlay_preserves_sources_and_cleanup_after_errors() {
         .unwrap();
         let configuration = directory.join("cvd.yml");
         fs::write(&configuration, "version: 1\ninventory: [inventory.yml]\nprovisioner: ansible\nconverger: ansible\nverifier: dummy\nscenarios:\n  host:\n    create:\n      ansible:\n        playbook: create.yml\n    converge:\n      ansible:\n        playbook: converge.yml\n    cleanup:\n      ansible:\n        playbook: cleanup.yml\n    destroy:\n      ansible:\n        playbook: destroy.yml\n").unwrap();
+        let mut original_sources = vec![directory.join("inventory.yml")];
+        let inherited = if mode == "inherited" {
+            let sources = [
+                directory.join("environment one.yml"),
+                directory.join("environment-two.yml"),
+            ];
+            for source in &sources {
+                fs::write(source, "all: {hosts: {external: {}}}\n").unwrap();
+            }
+            let extra = directory.join("extra inventory.yml");
+            fs::write(&extra, "all: {hosts: {web: {}}}\n").unwrap();
+            let yaml = fs::read_to_string(&configuration)
+                .unwrap()
+                .replace("[inventory.yml]", "[inventory.yml, extra inventory.yml]");
+            fs::write(&configuration, yaml).unwrap();
+            original_sources.splice(0..0, sources.clone());
+            original_sources.push(extra);
+            Some(format!("{},{}", sources[0].display(), sources[1].display()))
+        } else if mode == "empty" {
+            Some(String::new())
+        } else {
+            None
+        };
+        let original_inventory = original_sources
+            .iter()
+            .map(|source| source.to_str().unwrap())
+            .collect::<Vec<_>>()
+            .join(",");
         let executable = bin.join("ansible-playbook");
         fs::write(&executable, r#"#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -698,11 +729,16 @@ for resource in cvd['resources']:
 assert cvd['resources_by_type'] == expected_groups
 mode = os.environ['CVD_TEST_MODE']
 args = sys.argv[1:]
-sources = [args[i+1] for i, arg in enumerate(args) if arg == '--inventory']
-assert pathlib.Path(sources[0]).name == ('destroy-inventory.yml' if cvd['action'] == 'destroy' else 'inventory.yml')
+assert '--inventory' not in args and '-i' not in args
+sources = os.environ['ANSIBLE_INVENTORY'].split(',')
+original = os.environ['CVD_TEST_ORIGINAL_INVENTORY'].split(',')
+if cvd['action'] == 'destroy':
+    assert pathlib.Path(sources[0]).name == 'destroy-inventory.yml'
+else:
+    assert sources[:len(original)] == original
 record = {'action': cvd['action'], 'sources': sources, 'resources': cvd['resources']}
 if cvd['action'] == 'create':
-    assert len(sources) == 1
+    assert sources == original
     binding = {'inventory_hostname': 'typo' if mode == 'unknown-host' else 'web', 'vars': {'ansible_host': 'actual-container', 'ansible_connection': 'local'}}
     if mode == 'malformed': binding['vars'] = []
     resources = [{'id': 'container-id', 'type': 'docker.container', 'attributes': {'ansible': binding}}, {'id': 'network-id', 'type': 'docker.network'}]
@@ -711,8 +747,8 @@ if cvd['action'] == 'create':
 elif cvd['action'] in ['converge', 'cleanup']:
     assert cvd['resources_by_type']['docker.container'][0]['id'] == 'container-id'
     assert cvd['resources_by_type']['docker.network'][0]['id'] == 'network-id'
-    assert len(sources) == 2
-    record['overlay'] = pathlib.Path(sources[1]).read_text()
+    assert len(sources) == len(original) + 1
+    record['overlay'] = pathlib.Path(sources[-1]).read_text()
 elif cvd['action'] == 'destroy':
     assert len(sources) == 1
     assert cvd['resources'][0]['id'] == 'network-id'
@@ -722,10 +758,23 @@ if mode == 'converge-error' and cvd['action'] == 'converge': sys.exit(2)
 "#).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let inspect = bin.join("ansible-inventory");
-        fs::write(&inspect, "#!/bin/sh\nprintf '%s\\n' '{\"all\":{\"children\":[\"webservers\"]},\"webservers\":{\"hosts\":[\"web\"]},\"_meta\":{\"hostvars\":{}}}'\n").unwrap();
+        fs::write(
+            &inspect,
+            r#"#!/usr/bin/env python3
+import json, os, sys
+assert '--inventory' not in sys.argv and '-i' not in sys.argv
+assert os.environ['ANSIBLE_INVENTORY'] == os.environ['CVD_TEST_ORIGINAL_INVENTORY']
+print(json.dumps({'all': {'hosts': ['web']}}))
+"#,
+        )
+        .unwrap();
         fs::set_permissions(&inspect, fs::Permissions::from_mode(0o755)).unwrap();
         let capture = directory.join("calls.jsonl");
-        let state_directory = directory.join("state");
+        let state_directory = directory.join(if mode == "comma-overlay" {
+            "state,with-comma"
+        } else {
+            "state"
+        });
         let mut paths = vec![bin];
         paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
         let mut invocation = command(&[
@@ -738,15 +787,19 @@ if mode == 'converge-error' and cvd['action'] == 'converge': sys.exit(2)
         if mode == "keep" {
             invocation.arg("--keep");
         }
+        if let Some(inherited) = inherited {
+            invocation.env("ANSIBLE_INVENTORY", inherited);
+        }
         let output = invocation
             .env("PATH", env::join_paths(paths).unwrap())
             .env("CVD_TEST_MODE", mode)
             .env("CVD_TEST_CAPTURE", &capture)
+            .env("CVD_TEST_ORIGINAL_INVENTORY", original_inventory)
             .output()
             .unwrap();
         assert_eq!(
             output.status.success(),
-            matches!(mode, "pass" | "keep"),
+            matches!(mode, "pass" | "inherited" | "empty" | "keep"),
             "{mode}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -771,7 +824,10 @@ if mode == 'converge-error' and cvd['action'] == 'converge': sys.exit(2)
             scenario["resources"]["resources"][0]["exists"],
             mode == "keep"
         );
-        if matches!(mode, "pass" | "keep" | "converge-error") {
+        if matches!(
+            mode,
+            "pass" | "inherited" | "empty" | "keep" | "converge-error"
+        ) {
             let overlay = calls[1]["overlay"].as_str().unwrap();
             assert!(overlay.contains("actual-container"));
             assert!(!overlay.contains("network-id"));
@@ -785,12 +841,73 @@ if mode == 'converge-error' and cvd['action'] == 'converge': sys.exit(2)
             );
             assert_eq!(scenario["phases"]["cleanup"]["status"], "pass");
         }
-        if !matches!(mode, "pass" | "keep") {
+        if !matches!(mode, "pass" | "inherited" | "empty" | "keep") {
             assert_eq!(state["primary_error"]["scenario_path"], "host");
             assert_eq!(state["primary_error"]["phase"], "converge");
         }
+        if mode == "comma-overlay" {
+            assert!(
+                state["primary_error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("containing commas")
+            );
+            assert_eq!(calls.len(), 2);
+            assert_eq!(scenario["phases"]["destroy"]["status"], "pass");
+        }
         fs::remove_dir_all(directory).unwrap();
     }
+}
+
+#[test]
+fn ansible_rejects_configured_inventory_paths_with_commas_before_launch() {
+    let directory = test_directory("inventory-comma-source");
+    let bin = directory.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        directory.join("inventory,one.yml"),
+        "all: {hosts: {web: {}}}\n",
+    )
+    .unwrap();
+    fs::write(directory.join("create.yml"), "---\n").unwrap();
+    let configuration = directory.join("cvd.yml");
+    fs::write(
+        &configuration,
+        "version: 1\ninventory: ['inventory,one.yml']\nprovisioner: ansible\nconverger: dummy\nverifier: dummy\nscenarios:\n  host:\n    create:\n      ansible:\n        playbook: create.yml\n",
+    )
+    .unwrap();
+    let script = bin.join("ansible-playbook");
+    fs::write(&script, "#!/bin/sh\ntouch ansible-was-launched\n").unwrap();
+    fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut paths = vec![bin];
+    paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+    let state_directory = directory.join("state");
+    let output = command(&[
+        "run",
+        "--file",
+        configuration.to_str().unwrap(),
+        "--state-dir",
+        state_directory.to_str().unwrap(),
+    ])
+    .env("PATH", env::join_paths(paths).unwrap())
+    .output()
+    .unwrap();
+    assert!(!output.status.success());
+    assert!(!directory.join("ansible-was-launched").exists());
+    let state = load_state(
+        &state_directory
+            .join("runs")
+            .join(last_run_id(&state_directory))
+            .join("state.json"),
+    );
+    assert_eq!(state["primary_error"]["phase"], "create");
+    assert!(
+        state["primary_error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("containing commas")
+    );
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -808,11 +925,11 @@ fn native_ansible_preserves_group_vars_host_vars_and_default_sources() {
             }
         }
     }
-    for source in ["explicit", "config", "environment"] {
+    for source in ["explicit", "config", "environment", "combined"] {
         let directory = test_directory(&format!("native-inventory-{source}"));
         copy_tree(Path::new("tests/fixtures/ansible-inventory"), &directory);
         let configuration = directory.join("cvd.yml");
-        if source != "explicit" {
+        if matches!(source, "config" | "environment") {
             let yaml = fs::read_to_string(&configuration)
                 .unwrap()
                 .replace("inventory: [inventory.yml]\n", "");
@@ -839,6 +956,28 @@ fn native_ansible_preserves_group_vars_host_vars_and_default_sources() {
             )
             .unwrap();
             invocation.env("ANSIBLE_INVENTORY", directory.join("environment.yml"));
+        }
+        if source == "combined" {
+            // Keep the external host only in the inherited source, so Ansible
+            // and testinfra must load it alongside CVD's configured inventory.
+            let inventory = fs::read_to_string(directory.join("inventory.yml"))
+                .unwrap()
+                .replace(
+                    "        external:\n          ansible_connection: local\n",
+                    "",
+                );
+            fs::write(directory.join("inventory.yml"), inventory).unwrap();
+            fs::write(
+                directory.join("environment.yml"),
+                "all:\n  children:\n    webservers:\n      hosts:\n        external:\n          ansible_connection: local\n",
+            )
+            .unwrap();
+            invocation.env("ANSIBLE_INVENTORY", directory.join("environment.yml"));
+            let test = directory.join("test_inventory.py");
+            let contents = fs::read_to_string(&test)
+                .unwrap()
+                .replace("assert len(sources) == 2", "assert len(sources) == 3");
+            fs::write(test, contents).unwrap();
         }
         let output = invocation.output().unwrap();
         assert!(
@@ -961,7 +1100,7 @@ import json, os, pathlib, sys
 assert os.environ['CVD_DIRECTORY'] == os.getcwd()
 sources = os.environ['ANSIBLE_INVENTORY'].split(',')
 record = {'sources': sources, 'args': sys.argv[1:], 'cwd': os.getcwd()}
-if len(sources) > 1: record['overlay'] = pathlib.Path(sources[-1]).read_text()
+if pathlib.Path(sources[-1]).name == 'ansible-inventory.yml': record['overlay'] = pathlib.Path(sources[-1]).read_text()
 with open(os.environ['CVD_TEST_CAPTURE'], 'a') as f: f.write(json.dumps(record) + '\n')
 mode = os.environ['CVD_TEST_MODE']
 sys.exit(int(mode) if mode.isdigit() else 0)
@@ -993,7 +1132,7 @@ sys.exit(int(mode) if mode.isdigit() else 0)
             .env("CVD_TEST_MODE", mode)
             .env("CVD_TEST_CAPTURE", &capture)
             .env("CVD_TEST_DESTROY", &destroy)
-            .env("ANSIBLE_INVENTORY", "must-be-overridden")
+            .env("ANSIBLE_INVENTORY", "inherited one.yml,inherited-two.yml")
             .output()
             .unwrap();
         let success = matches!(mode, "pass" | "keep" | "nested" | "external-only");
@@ -1027,15 +1166,17 @@ sys.exit(int(mode) if mode.isdigit() else 0)
             let first: Value =
                 serde_json::from_str(fs::read_to_string(capture).unwrap().lines().next().unwrap())
                     .unwrap();
+            assert_eq!(first["sources"][0], "inherited one.yml");
+            assert_eq!(first["sources"][1], "inherited-two.yml");
             assert_eq!(
-                first["sources"][0],
+                first["sources"][2],
                 directory.join("inventory.yml").to_str().unwrap()
             );
             assert_eq!(first["cwd"], directory.to_str().unwrap());
             if mode == "external-only" {
-                assert_eq!(first["sources"].as_array().unwrap().len(), 1);
+                assert_eq!(first["sources"].as_array().unwrap().len(), 3);
             } else {
-                assert_eq!(first["sources"].as_array().unwrap().len(), 2);
+                assert_eq!(first["sources"].as_array().unwrap().len(), 4);
                 assert!(first["overlay"].as_str().unwrap().contains("runtime-web"));
                 assert_eq!(
                     scenario["views"]["ansible_inventory"]["created"]["phase"],
@@ -1160,8 +1301,10 @@ elif cvd['action'] == 'verify':
     assert cvd['resources'][0]['id'] == 'web'
     assert cvd['resources_by_type']['container'] == cvd['resources']
     assert cvd['directory'] == os.getcwd()
-    sources = [sys.argv[i+1] for i, arg in enumerate(sys.argv) if arg == '--inventory']
-    assert sources[0] == str(pathlib.Path.cwd() / 'inventory.yml')
+    assert '--inventory' not in sys.argv and '-i' not in sys.argv
+    sources = os.environ['ANSIBLE_INVENTORY'].split(',')
+    assert sources[0] == 'inherited.yml'
+    assert sources[1] == str(pathlib.Path.cwd() / 'inventory.yml')
     assert 'runtime-web' in pathlib.Path(sources[-1]).read_text()
     pathlib.Path(os.environ['CVD_TEST_CAPTURE']).write_text('verified')
     sys.exit(int(os.environ['CVD_TEST_EXIT']))
@@ -1188,6 +1331,7 @@ elif cvd['action'] == 'verify':
         .env("PATH", env::join_paths(paths).unwrap())
         .env("CVD_TEST_EXIT", exit.to_string())
         .env("CVD_TEST_CAPTURE", &capture)
+        .env("ANSIBLE_INVENTORY", "inherited.yml")
         .output()
         .unwrap();
         assert_eq!(
