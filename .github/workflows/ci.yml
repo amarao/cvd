@@ -48,5 +48,10 @@ jobs:
       - name: Run syntax-check integration tests
         run: cargo test --locked --test syntax_check
 
+      - name: Test cargo install
+        run: |
+          cargo install --path . --locked --root "$RUNNER_TEMP/cvd-install"
+          "$RUNNER_TEMP/cvd-install/bin/cvd" --help
+
       - name: Run Docker example with Ansible and pytest verification
         run: cargo run --locked -- run --file examples/ansible-docker/cvd.yml
