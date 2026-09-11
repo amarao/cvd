@@ -123,7 +123,6 @@ struct DummyOptions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfiguredPhase {
-    Dependency,
     Create,
     Prepare,
     Converge,
@@ -180,8 +179,6 @@ impl TestMap {
 #[serde(deny_unknown_fields)]
 struct RawScenario {
     #[serde(default)]
-    dependency: AbsentOrValue,
-    #[serde(default)]
     create: AbsentOrValue,
     #[serde(default)]
     prepare: AbsentOrValue,
@@ -206,8 +203,6 @@ struct RawNestedScenario {
     #[serde(default)]
     include: Option<PathBuf>,
     #[serde(default)]
-    dependency: AbsentOrValue,
-    #[serde(default)]
     create: AbsentOrValue,
     #[serde(default)]
     prepare: AbsentOrValue,
@@ -228,7 +223,6 @@ struct RawNestedScenario {
 impl RawNestedScenario {
     fn into_scenario(self) -> RawScenario {
         RawScenario {
-            dependency: self.dependency,
             create: self.create,
             prepare: self.prepare,
             converge: self.converge,
@@ -241,8 +235,7 @@ impl RawNestedScenario {
     }
 
     fn has_inline_content(&self) -> bool {
-        self.dependency.is_present()
-            || self.create.is_present()
+        self.create.is_present()
             || self.prepare.is_present()
             || self.converge.is_present()
             || self.idempotence.is_present()
@@ -487,7 +480,6 @@ fn resolve_scenario(
     path: &str,
 ) -> Result<Scenario, ConfigError> {
     let RawScenario {
-        dependency,
         create,
         prepare,
         converge,
@@ -517,7 +509,6 @@ fn resolve_scenario(
     }
 
     for (phase, value) in [
-        (ConfiguredPhase::Dependency, dependency),
         (ConfiguredPhase::Create, create),
         (ConfiguredPhase::Prepare, prepare),
         (ConfiguredPhase::Converge, converge),
@@ -841,7 +832,6 @@ fn resolve_ansible_options(
 
 fn configured_phase_name(phase: ConfiguredPhase) -> &'static str {
     match phase {
-        ConfiguredPhase::Dependency => "dependency",
         ConfiguredPhase::Create => "create",
         ConfiguredPhase::Prepare => "prepare",
         ConfiguredPhase::Converge => "converge",
@@ -1063,7 +1053,7 @@ scenarios:
                 .replace("    converge:", &format!("    {phase}:"));
             Config::from_yaml_at(&yaml, &path).unwrap();
         }
-        for phase in ["verify", "idempotence", "dependency"] {
+        for phase in ["verify", "idempotence"] {
             let yaml = yaml
                 .replace("    verify:\n", "")
                 .replace("    converge:", &format!("    {phase}:"));

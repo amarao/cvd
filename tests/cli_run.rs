@@ -378,7 +378,7 @@ fn state_report_replays_last_and_explicit_runs_without_reading_configuration() {
     let latest = String::from_utf8(latest.stdout).unwrap();
     assert!(!latest.contains("\x1b["));
     assert!(latest.contains("Scenario: independent\n"));
-    assert!(latest.contains("independent::dependency skipped\n"));
+    assert!(latest.contains("independent::prepare skipped\n"));
     assert!(latest.contains("independent::create: 1 resource added\n"));
     assert!(latest.contains("Scenario: independent: passed\n"));
     assert!(latest.ends_with(&format!(
@@ -465,8 +465,7 @@ fn dummy_example_runs_every_phase_successfully() {
             .join("state.json"),
     );
     let scenario = &state["scenarios"]["default"];
-    for phase in [
-        "dependency",
+    let phases = [
         "create",
         "prepare",
         "converge",
@@ -474,7 +473,9 @@ fn dummy_example_runs_every_phase_successfully() {
         "verify",
         "cleanup",
         "destroy",
-    ] {
+    ];
+    assert_eq!(scenario["phases"].as_object().unwrap().len(), phases.len());
+    for phase in phases {
         assert_eq!(scenario["phases"][phase]["status"], "pass", "phase {phase}");
     }
     assert_eq!(scenario["test_results"][0]["status"], "pass");

@@ -21,15 +21,14 @@ existing project configuration by default.
 A **scenario** is the universal execution unit. A scenario can contain child
 scenarios to arbitrary depth and can define any of these optional phases:
 
-1. `dependency`
-2. `create`
-3. `prepare`
-4. `converge`
-5. `idempotence`
-6. `verify`
-7. child scenarios
-8. `cleanup`
-9. `destroy`
+1. `create`
+2. `prepare`
+3. `converge`
+4. `idempotence`
+5. `verify`
+6. child scenarios
+7. `cleanup`
+8. `destroy`
 
 Each scenario explicitly declares the phases it enables as keys. Omitted phase
 keys are recorded as skipped. `verify` contains named test definitions as
@@ -129,9 +128,6 @@ A provisioner must support:
 - `destroy`: destroy resources owned by the relevant scenario.
 
 Create may allocate resources from an existing pool or create new objects.
-
-A provisioner can optionally support `dependency` phase (before create):
-install or validate prerequisites, e.g. install ansible collections.
 
 Provisioner input is opaque to the lifecycle core. Each provisioner adapter
 owns and validates its input schema. Output is returned to CVD and updated with

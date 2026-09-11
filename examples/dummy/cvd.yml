@@ -5,9 +5,6 @@ verifier: dummy
 
 scenarios:
   default:
-    dependency:
-      dummy:
-        status: ok
     create:
       dummy:
         status: ok

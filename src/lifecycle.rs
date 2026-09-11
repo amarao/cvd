@@ -145,9 +145,6 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         remaining_selector: &[&str],
     ) -> bool {
         self.state.enter_scenario(path, parent_path);
-        if self.run_converger_phase(scenario, path, LifecyclePhase::Dependency) {
-            return true;
-        }
         if scenario.has_phase(ConfiguredPhase::Create) {
             if self
                 .persist_or_record(path, LifecyclePhase::Create)
@@ -534,7 +531,6 @@ fn render_persisted_scenario<W: Write>(
     let scenario = &state.scenarios[path];
     write_scenario_entrance(output, path, styled_output)?;
     for phase in [
-        LifecyclePhase::Dependency,
         LifecyclePhase::Create,
         LifecyclePhase::Prepare,
         LifecyclePhase::Converge,
@@ -780,7 +776,6 @@ fn persisted_outcome(state: &RunState) -> RunOutcome {
 
 fn configured_phase(phase: &LifecyclePhase) -> ConfiguredPhase {
     match phase {
-        LifecyclePhase::Dependency => ConfiguredPhase::Dependency,
         LifecyclePhase::Create => ConfiguredPhase::Create,
         LifecyclePhase::Prepare => ConfiguredPhase::Prepare,
         LifecyclePhase::Converge => ConfiguredPhase::Converge,
@@ -793,7 +788,6 @@ fn configured_phase(phase: &LifecyclePhase) -> ConfiguredPhase {
 
 fn phase_name(phase: &LifecyclePhase) -> &'static str {
     match phase {
-        LifecyclePhase::Dependency => "dependency",
         LifecyclePhase::Create => "create",
         LifecyclePhase::Prepare => "prepare",
         LifecyclePhase::Converge => "converge",
@@ -994,7 +988,7 @@ scenarios:
         runner.run(Some("default")).unwrap();
         let output = String::from_utf8(bytes.borrow().clone()).unwrap();
         assert!(!output.contains("\x1b["));
-        assert!(output.contains("Scenario: default\n"));
+        assert!(output.starts_with("Scenario: default\ndefault::create running\n"));
         assert!(output.contains("Scenario: default: passed"));
         assert!(output.contains("default::create running\n"));
         assert!(output.contains("default::converge running\n"));
@@ -1057,7 +1051,7 @@ scenarios:
 
         let output = String::from_utf8(bytes.borrow().clone()).unwrap();
         assert_eq!(output.matches("\x1b[1mScenario: empty\x1b[0m").count(), 1);
-        assert!(output.contains("\x1b[90mempty::dependency skipped\x1b[0m\n"));
+        assert!(output.contains("\x1b[90mempty::prepare skipped\x1b[0m\n"));
         assert!(output.contains("\x1b[90m\x1b[1mScenario: empty: skipped\x1b[0m\n"));
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1107,7 +1101,7 @@ scenarios:
         let report = String::from_utf8(report).unwrap();
         assert!(!report.contains("\x1b["));
         assert!(report.contains("Scenario: default\n"));
-        assert!(report.contains("default::dependency skipped\n"));
+        assert!(report.contains("default::idempotence skipped\n"));
         assert!(report.contains("Scenario: default/restart\n"));
         assert!(report.contains("default/restart::create: 1 resource added\n"));
         assert!(report.contains("Scenario: default/restart/deep\n"));
@@ -1138,7 +1132,7 @@ scenarios:
     fn styled_state_report_uses_live_colors_and_reports_running_phases() {
         let mut run_state = state(Some("empty"), false);
         run_state.enter_scenario("empty", None);
-        run_state.complete_phase("empty", LifecyclePhase::Dependency, PhaseStatus::Skipped);
+        run_state.complete_phase("empty", LifecyclePhase::Prepare, PhaseStatus::Skipped);
         run_state.complete_phase("empty", LifecyclePhase::Create, PhaseStatus::Pass);
         run_state.mark_phase_running("empty", LifecyclePhase::Converge);
 
@@ -1146,7 +1140,7 @@ scenarios:
         render_state_report(&run_state, &mut report, true).unwrap();
         let report = String::from_utf8(report).unwrap();
         assert!(report.contains("\x1b[1mScenario: empty\x1b[0m\n"));
-        assert!(report.contains("\x1b[90mempty::dependency skipped\x1b[0m\n"));
+        assert!(report.contains("\x1b[90mempty::prepare skipped\x1b[0m\n"));
         assert!(report.contains("\x1b[32mempty::create: 0 resource added\x1b[0m\n"));
         assert!(report.contains("empty::converge running\x1b[0m\n"));
         assert!(report.contains("\x1b[31m\x1b[1mScenario: empty: error\x1b[0m\n"));

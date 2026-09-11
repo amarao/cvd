@@ -148,7 +148,7 @@ fn accepts_a_complicated_scenario() {
     let configuration = directory.join("cvd.yml");
     write_file(
         &configuration,
-        b"version: 1\nprovisioner: dummy\nconverger: dummy\nverifier: dummy\nscenarios:\n  complicated:\n    dependency: dependency input\n    create:\n      dummy: {}\n    prepare: prepare input\n    converge:\n      - first convergence input\n      - second convergence input\n    idempotence:\n    verify:\n      smoke: {}\n      expected-failure:\n        status: fail\n    nested:\n      - name: restart\n        create:\n        converge:\n          dummy:\n            status: ok\n        verify:\n          after-restart: {}\n        cleanup:\n        destroy:\n      - name: deeper\n        nested:\n          - name: final\n            verify:\n              final-check: {}\n    cleanup:\n      dummy: {}\n    destroy:\n",
+        b"version: 1\nprovisioner: dummy\nconverger: dummy\nverifier: dummy\nscenarios:\n  complicated:\n    create:\n      dummy: {}\n    prepare: prepare input\n    converge:\n      - first convergence input\n      - second convergence input\n    idempotence:\n    verify:\n      smoke: {}\n      expected-failure:\n        status: fail\n    nested:\n      - name: restart\n        create:\n        converge:\n          dummy:\n            status: ok\n        verify:\n          after-restart: {}\n        cleanup:\n        destroy:\n      - name: deeper\n        nested:\n          - name: final\n            verify:\n              final-check: {}\n    cleanup:\n      dummy: {}\n    destroy:\n",
     );
 
     assert_valid(syntax_check(&["--file", configuration.to_str().unwrap()]));

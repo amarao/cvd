@@ -37,7 +37,6 @@ pub type Timestamp = u64;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecyclePhase {
-    Dependency,
     Create,
     Prepare,
     Converge,
@@ -714,7 +713,7 @@ mod tests {
             false,
         );
         state.enter_scenario("default", None);
-        state.complete_phase("default", LifecyclePhase::Dependency, PhaseStatus::Skipped);
+        state.complete_phase("default", LifecyclePhase::Prepare, PhaseStatus::Skipped);
         state.mark_phase_running("default", LifecyclePhase::Create);
         state.complete_phase("default", LifecyclePhase::Create, PhaseStatus::Pass);
         state.enter_scenario("default/restart", Some("default".into()));

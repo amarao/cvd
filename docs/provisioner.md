@@ -5,8 +5,8 @@
 CVD runs each scenario through its declared phases in this order:
 
 ```text
-dependency → create → prepare → converge → idempotence → verify
-           → child scenarios → cleanup → destroy
+create → prepare → converge → idempotence → verify
+       → child scenarios → cleanup → destroy
 ```
 
 An Ansible provisioner handles the `create` and `destroy` phases. Create
