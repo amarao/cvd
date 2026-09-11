@@ -96,9 +96,9 @@ The create playbook writes one JSON document to `cvd.result_file` (for example,
 
 Each resource requires a nonempty `id` and `type`. IDs must be unique within
 the result and identify the actual objects that destroy will remove or
-release. Optional fields are an `attributes` mapping, `relationships` list,
-and `sensitive_attributes` list. Do not include credentials: secret persistence
-is deferred. CVD adds ownership, existence, and creation/destruction metadata.
+release. An optional `attributes` mapping and `relationships` list carry
+additional resource data. CVD adds ownership, existence, and creation/destruction
+metadata.
 
 Publish the aggregate result once, on the controller, using
 `ansible.builtin.copy` or `ansible.builtin.template` with atomic writes enabled.

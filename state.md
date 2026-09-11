@@ -63,8 +63,6 @@ Internal execution status is `pending` or `running`. A completed phase result is
   report layout. Roots and siblings use deterministic lexical path order;
   declaration order is not persisted.
 - Never discard the primary error when destruction also fails.
-- Redact sensitive resource attributes before serialization. This requirement
-  is not yet implemented; `sensitive_attributes` currently only records metadata.
 
 ## Ansible inventory views
 
@@ -82,13 +80,10 @@ after destruction as a record of the last rendered inventory, not a live
 resource-existence query. Within schema version 3, records without the optional
 field load with no views. Original inventory sources and variable files are
 not copied.
-Do not report credentials in resource manifests: encrypted secret persistence
-and external secret references remain deferred.
 
 ## Deferred decisions
 
 - Stable project identity and the final default storage directory.
 - Cross-process locking and concurrent invocation behavior.
-- Secret encryption versus omission or external secret references.
 - Garbage collection of completed state and generated views.
 - Compatibility and migration policy for state schema changes.

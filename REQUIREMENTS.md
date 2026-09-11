@@ -68,8 +68,7 @@ Every resource has:
 - whether it currently exists;
 - the scenario and phase where it was created;
 - the scenario and phase where it was destroyed, when applicable;
-- optional relationships to other resources; and
-- optional sensitive attributes (e.g. passwords).
+- optional relationships to other resources.
 
 Resource collections preserve declaration/provisioner order. An Ansible host
 listed first remains first in generated inventories and resource views.
@@ -377,10 +376,8 @@ default/instance_provision/second-reconfiguration
 Completed phase results are `skipped` (omitted or skipped by the operator),
 `pass` (successful), or `error` (lifecycle or verifier execution failed).
 Verifiers can additionally report assertion failures as `fail`; these are
-recorded and execution continues unless the scenario sets `fails_are_fatal`.
+recorded and execution continues.
 The current Ansible and pytest exceptions are specified above.
-`fails_are_fatal` is required behavior but is not yet accepted by the
-configuration schema.
 
 Every error retains its scenario path and phase, such as
 `default/restart::prepare`. Final reports include failures and errors; either
@@ -411,8 +408,6 @@ unimplemented.
 [state.md](state.md) defines persisted data, run history, and atomic writes.
 Each run is independent; `last` selects the most recently started run.
 `state-resources` hides destroyed resources unless `--deleted` is requested.
-
-Sensitive values are redacted from logs and reports.
 
 Interactive run output groups phases under a single scenario entrance header.
 All scenario, phase, command, and verdict lines are emitted without indentation.
@@ -463,7 +458,7 @@ These choices require focused design work before implementation:
 - general third-party provisioner process protocol and versioning beyond the
   built-in Ansible contract;
 - Ansible inventory execution selection for masked resources and richer view overrides;
-- final persistence layout and secret handling (see state.md);
+- final persistence layout (see state.md);
 - exact safe-phase and rerun rules after interrupted executions;
 - plugin discovery and distribution; and
 - aggregation rules for nested scenario results.
