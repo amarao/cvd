@@ -81,6 +81,11 @@ resource-existence query. Within schema version 3, records without the optional
 field load with no views. Original inventory sources and variable files are
 not copied.
 
+The additional pytest inventory snippet carrying `all.vars.cvd` is a transient
+invocation input. It and its companion JSON input are removed after the pytest
+process finishes or fails to launch, and are not recorded as view resources.
+The persisted host overlay remains independent of this test-specific context.
+
 ## Deferred decisions
 
 - Stable project identity and the final default storage directory.

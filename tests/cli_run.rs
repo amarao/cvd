@@ -976,7 +976,7 @@ fn native_ansible_preserves_group_vars_host_vars_and_default_sources() {
             let test = directory.join("test_inventory.py");
             let contents = fs::read_to_string(&test)
                 .unwrap()
-                .replace("assert len(sources) == 2", "assert len(sources) == 3");
+                .replace("assert len(sources) == 3", "assert len(sources) == 4");
             fs::write(test, contents).unwrap();
         }
         let output = invocation.output().unwrap();
@@ -1015,7 +1015,9 @@ fn pytest_receives_inventory_and_all_unsuccessful_exits_are_errors() {
         "spawn-error",
         "keep",
         "nested",
+        "multiple",
         "external-only",
+        "non-host",
     ] {
         let directory = test_directory(&format!("pytest-{mode}"));
         let bin = directory.join("bin");
@@ -1061,6 +1063,14 @@ scenarios:
               path: test_example.py
 "#
         );
+        let yaml = if mode == "multiple" {
+            yaml.replace(
+                "      second:\n        verifier: dummy",
+                "      second:\n        pytest:\n          path: test_example.py",
+            )
+        } else {
+            yaml
+        };
         fs::write(&configuration, yaml).unwrap();
         let ansible = bin.join("ansible-playbook");
         fs::write(&ansible, r#"#!/usr/bin/env python3
@@ -1077,7 +1087,13 @@ for resource in cvd['resources']:
     expected_groups.setdefault(resource['type'], []).append(resource)
 assert cvd['resources_by_type'] == expected_groups
 if cvd['action'] == 'create':
-    json.dump({'manifest_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': [{'id': 'actual-web', 'type': 'container', 'attributes': {'ansible': {'inventory_hostname': 'web', 'vars': {'ansible_host': 'runtime-web'}}}}]}, open(cvd['result_file'], 'w'))
+    resources = [
+        {'id': 'actual-web', 'type': 'container', 'attributes': {'ansible': {'inventory_hostname': 'web', 'vars': {'ansible_host': 'runtime-web'}}}},
+        {'id': 'actual-network', 'type': 'network'},
+        {'id': 'other-container', 'type': 'container'},
+    ]
+    if os.environ['CVD_TEST_MODE'] == 'non-host': resources = resources[1:]
+    json.dump({'manifest_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': resources}, open(cvd['result_file'], 'w'))
 else:
     json.dump(cvd['resources'], open(os.environ['CVD_TEST_DESTROY'], 'w'))
 "#).unwrap();
@@ -1096,11 +1112,18 @@ else:
                 "#!/cvd-missing-interpreter\n"
             } else {
                 r#"#!/usr/bin/env python3
-import json, os, pathlib, sys
+import json, os, pathlib, stat, sys
 assert os.environ['CVD_DIRECTORY'] == os.getcwd()
 sources = os.environ['ANSIBLE_INVENTORY'].split(',')
-record = {'sources': sources, 'args': sys.argv[1:], 'cwd': os.getcwd()}
-if pathlib.Path(sources[-1]).name == 'ansible-inventory.yml': record['overlay'] = pathlib.Path(sources[-1]).read_text()
+context = pathlib.Path(sources[-1])
+assert context.name == 'cvd-inventory.yml'
+assert stat.S_IMODE(context.stat().st_mode) == 0o600
+assert stat.S_IMODE(context.parent.stat().st_mode) == 0o700
+cvd = json.loads((context.parent / 'input.json').read_text())['cvd']
+assert pathlib.Path(cvd['input_file']).is_file()
+assert not pathlib.Path(cvd['result_file']).exists()
+record = {'sources': sources, 'args': sys.argv[1:], 'cwd': os.getcwd(), 'context': context.read_text(), 'cvd': cvd}
+if pathlib.Path(sources[-2]).name == 'ansible-inventory.yml': record['overlay'] = pathlib.Path(sources[-2]).read_text()
 with open(os.environ['CVD_TEST_CAPTURE'], 'a') as f: f.write(json.dumps(record) + '\n')
 mode = os.environ['CVD_TEST_MODE']
 sys.exit(int(mode) if mode.isdigit() else 0)
@@ -1114,6 +1137,8 @@ sys.exit(int(mode) if mode.isdigit() else 0)
         let state_directory = directory.join("state");
         let capture = directory.join("pytest.jsonl");
         let destroy = directory.join("destroy.json");
+        let exchanges = directory.join("exchanges");
+        fs::create_dir(&exchanges).unwrap();
         let mut invocation = command(&[
             "run",
             "--file",
@@ -1132,10 +1157,14 @@ sys.exit(int(mode) if mode.isdigit() else 0)
             .env("CVD_TEST_MODE", mode)
             .env("CVD_TEST_CAPTURE", &capture)
             .env("CVD_TEST_DESTROY", &destroy)
+            .env("TMPDIR", &exchanges)
             .env("ANSIBLE_INVENTORY", "inherited one.yml,inherited-two.yml")
             .output()
             .unwrap();
-        let success = matches!(mode, "pass" | "keep" | "nested" | "external-only");
+        let success = matches!(
+            mode,
+            "pass" | "keep" | "nested" | "multiple" | "external-only" | "non-host"
+        );
         assert_eq!(
             output.status.success(),
             success,
@@ -1163,9 +1192,84 @@ sys.exit(int(mode) if mode.isdigit() else 0)
             assert!(result["message"].as_str().unwrap().contains("pytest"));
         }
         if mode != "spawn-error" {
-            let first: Value =
-                serde_json::from_str(fs::read_to_string(capture).unwrap().lines().next().unwrap())
-                    .unwrap();
+            let calls: Vec<Value> = fs::read_to_string(capture)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let first = &calls[0];
+            let mut invocation_ids = std::collections::BTreeSet::new();
+            for call in &calls {
+                let cvd = &call["cvd"];
+                assert!(invocation_ids.insert(cvd["invocation_id"].as_str().unwrap()));
+                let inventory: Value =
+                    serde_yaml::from_str(call["context"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    inventory,
+                    serde_json::json!({"all": {"vars": {"cvd": cvd}}})
+                );
+                assert_eq!(cvd["protocol_version"], 1);
+                assert_eq!(cvd["action"], "verify");
+                assert_eq!(cvd["directory"], directory.to_str().unwrap());
+                assert_eq!(cvd["vars"], serde_json::json!({}));
+                let expected_ids: Vec<&str> = match mode {
+                    "external-only" => vec![],
+                    "non-host" => vec!["actual-network", "other-container"],
+                    _ => vec!["actual-web", "actual-network", "other-container"],
+                };
+                let resources = cvd["resources"].as_array().unwrap();
+                assert_eq!(
+                    resources
+                        .iter()
+                        .map(|resource| resource["id"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    expected_ids
+                );
+                let mut grouped = serde_json::Map::new();
+                for resource in resources {
+                    assert_eq!(resource["created"]["scenario_path"], "root");
+                    assert_eq!(resource["exists"], true);
+                    grouped
+                        .entry(resource["type"].as_str().unwrap().to_owned())
+                        .or_insert_with(|| serde_json::json!([]))
+                        .as_array_mut()
+                        .unwrap()
+                        .push(resource.clone());
+                }
+                assert_eq!(cvd["resources_by_type"], Value::Object(grouped));
+                let context_path = Path::new(
+                    call["sources"]
+                        .as_array()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .as_str()
+                        .unwrap(),
+                );
+                assert!(!context_path.parent().unwrap().exists());
+            }
+            assert_eq!(first["cvd"]["scenario_selector"], path);
+            if success {
+                assert_eq!(
+                    calls.len(),
+                    if mode == "nested" {
+                        1
+                    } else if mode == "multiple" {
+                        3
+                    } else {
+                        2
+                    }
+                );
+                assert_eq!(
+                    calls.last().unwrap()["cvd"]["scenario_selector"],
+                    "root/child"
+                );
+                if mode == "multiple" {
+                    assert_eq!(calls[1]["cvd"]["scenario_selector"], "root");
+                }
+            } else {
+                assert_eq!(calls.len(), 1);
+            }
             assert_eq!(first["sources"][0], "inherited one.yml");
             assert_eq!(first["sources"][1], "inherited-two.yml");
             assert_eq!(
@@ -1173,10 +1277,12 @@ sys.exit(int(mode) if mode.isdigit() else 0)
                 directory.join("inventory.yml").to_str().unwrap()
             );
             assert_eq!(first["cwd"], directory.to_str().unwrap());
-            if mode == "external-only" {
-                assert_eq!(first["sources"].as_array().unwrap().len(), 3);
-            } else {
+            if matches!(mode, "external-only" | "non-host") {
                 assert_eq!(first["sources"].as_array().unwrap().len(), 4);
+                assert!(first.get("overlay").is_none());
+                assert!(scenario.get("views").is_none());
+            } else {
+                assert_eq!(first["sources"].as_array().unwrap().len(), 5);
                 assert!(first["overlay"].as_str().unwrap().contains("runtime-web"));
                 assert_eq!(
                     scenario["views"]["ansible_inventory"]["created"]["phase"],
@@ -1203,6 +1309,7 @@ sys.exit(int(mode) if mode.isdigit() else 0)
                 mode == "keep"
             );
         }
+        assert_eq!(fs::read_dir(exchanges).unwrap().count(), 0);
         fs::remove_dir_all(directory).unwrap();
     }
 }

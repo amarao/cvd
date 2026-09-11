@@ -1,6 +1,6 @@
 # CVD
 
-CVD is Converge - Verify - Destroy tool, allowing to run integration
+CVD is a `Create - Verify - Destroy` tool, allowing to run integration
 tests for IaaC (Infrastructure as a code) code.
 
 *Note: Work in progress.*
@@ -55,7 +55,11 @@ There are two idiomatic way to use cvd:
 ├── playbooks/
 ├── modules/
 ├── tests/
+├── roles/
+├── playbooks/
+├── .ansible/
 ├── cvd.yml
+├── ansible.cfg
 └── your-ci.yaml
 ```
 
@@ -67,6 +71,13 @@ It increase presence of '../..' syndrom in CVD configuration, but allows clear s
 In such case CVD is called `cvd run` (it will discover cvd.yaml or cvd.yml automatically).
 
 ```
+├── playbooks/
+├── modules/
+├── tests/
+├── roles/
+├── playbooks/
+├── .ansible/
+├── ansible.cfg
 ├── simple
 │   ├── cleanup.yml
 │   ├── converge.yml
@@ -96,10 +107,19 @@ In such case CVD is called `cvd run` (it will discover cvd.yaml or cvd.yml autom
 │   │   └── test_rolling.yaml  # playbook
 ```
 
-In such case cvd flow (?) is called `cvd -F extended run` or `cvd -F simple run`.
+To run multiple flows (? should we call it like that?), the idiomatic way is to set ANSIBLE_CONFIG to point
+to the absolute path of the ansible.cfg in the root of the project:
 
-Note: It's not expected to reuse playbooks (create/destroy) between flows (?) because if you want
-to reuse code, you've better to use nested or sequential scenarios within a single cvd.yaml.
+```
+ANSIBLE_CONFIG=$(realpath ansible.cfg)
+cd simple
+cvd run
+cd ..
+cvd run -F extended # alternative way of calling
+```
+
+Note: It's not expected to reuse non-production playbooks (create/prepare/destroy) between flows (?)
+because if you want to reuse code, you've better to use nested or sequential scenarios within a single cvd.yaml.
 
 ## Inventory
 
@@ -120,20 +140,19 @@ together with initial inventory (so we call it initial inventory).
 Nested scenarios are assuming resources, created by outer scenario as 'external' (so they create/destroy
 only own resources). Each such inventory is added in the list of inventories (for Ansible).
 
-## Ansible calling convention
+## Ansible/pytest calling convention
 
 CVD aims to keep ansible configuration as prestine as much as possible. There are two (?) alterations:
 
-1. `ANSIBLE_INVENTORY` environment variabler is used to pass inventory. If you add command-line --inventory, you are in danger zone.
-  Existing `ANSIBLE_INVENTORY` is honored and is added before initial inventory, using comma.
+1. `ANSIBLE_INVENTORY` environment variabler is used to pass inventory. (Don't add `--inventory` arument or you will break CVD).
+   Existing `ANSIBLE_INVENTORY` is honored and is added before initial inventory, using comma.
 2. cvd variables are passed using -e command line.
 3. All file paths in cvd.yaml are expanded to absolute paths before been passed to the ansible.
 
-Working directory is unchanged. That means, if you call it from a directory different from cvd.yaml, you need
+Working directory is set to the cvd_directory, which is the directory where cvd.yaml was found.
 
-It is possible to break ansible calls from CVD by setting very odd ANSIBLE_CONFIG variable, don't do it.
+Shared playbooks/roles/collections code can be achieved by setting `ANSIBLE_CONFIG` environment variable
+to the top-level `ansible.cfg`, where relative local paths to collections/roles are set.
 
 Pytest (for testifra) is getting the same ANSIBLE_INVENTORY, so any ansible integration (e.g. module calls) should
 work out of the box. `cvd` variable is passed via an additional inventory snippet.
-
-

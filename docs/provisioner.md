@@ -40,9 +40,18 @@ from inventory or creation input.
 
 ### Playbook input
 
-Playbook paths are relative to the scenario file. CVD runs playbooks from the
-root configuration directory. Playbook paths must exist when configuration is
-loaded. Create uses the original inventory sources. CVD passes inventory using
+Playbook paths are relative to the scenario file. CVD resolves playbook paths
+and configured inventory source paths to absolute paths before calling Ansible;
+inventory source paths are relative to the root configuration file. Paths must
+exist when configuration is loaded. Values inside `vars` remain opaque input
+and are not rewritten as paths.
+
+CVD runs playbooks from the root configuration directory, so selecting a
+configuration from elsewhere does not require changing the caller's shell
+directory. CVD preserves `ansible.cfg` and the inherited `ANSIBLE_CONFIG`
+selection, allowing the project to keep its own Ansible settings.
+
+Create uses the original inventory sources. CVD passes inventory using
 the subprocess's `ANSIBLE_INVENTORY` environment variable, without inventory
 CLI arguments. The comma-separated list contains inherited
 `ANSIBLE_INVENTORY` sources first, CVD's top-level `inventory` paths next, and
@@ -227,3 +236,39 @@ relative to the file declaring the scenario. No result file is required.
 A successful Ansible exit passes the test. Any nonzero exit, including an
 assertion failure, is an `error`: later tests and child scenarios stop, and
 normal cleanup and destruction are attempted.
+
+## Pytest and Testinfra context
+
+CVD also supplies the `cvd` context to each named pytest invocation through a
+separate inventory snippet appended last to `ANSIBLE_INVENTORY`, after original
+sources and any runtime host overlay. Its `all.vars.cvd` mapping is available
+through Testinfra's Ansible backend:
+
+```python
+testinfra_hosts = ["ansible://webservers"]
+
+
+def test_cvd_context(host):
+    cvd = host.ansible.get_variables()["cvd"]
+    assert cvd["action"] == "verify"
+    containers = cvd["resources_by_type"].get("docker.container", [])
+    assert containers
+```
+
+Each invocation receives a fresh invocation ID, its current scenario selector,
+and all existing visible ancestor and scenario resources, including non-host
+resources. The fields match Ansible's protocol-v1 `cvd` mapping. `cvd.vars` is
+currently empty because pytest configuration accepts only `path` and `args`.
+`cvd.input_file` points to a JSON file containing the same top-level `cvd`
+mapping; `cvd.result_file` is reserved and no pytest result file is required.
+
+The snippet introduces no hosts or connection settings and is generated even
+without runtime host bindings. Using inventory lets Testinfra read the context
+through its existing API without a custom fixture. Ordinary inventory variable
+precedence applies, so user inventory must not override the reserved `cvd`
+name. This access requires the `ansible://` Testinfra backend.
+
+The context files are private per-invocation inputs (directory mode 0700, files
+0600), removed after pytest exits or fails to launch. They are not persisted
+as resource views. The existing runtime host overlay remains available in
+run state independently of this context.

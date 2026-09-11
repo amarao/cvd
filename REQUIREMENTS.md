@@ -10,9 +10,49 @@ CVD (Create-Verify-Destroy) is a test harness for infrastructure as code:
 - Ansible collections; and
 - nested test scenarios with side effects and multiple tests.
 
+The primary use case is full integration testing against real infrastructure:
+physical servers, virtual machines, clusters, network switches, and provider
+APIs. Small-scale role testing is supported, but the design must also serve
+complete infrastructure projects and their existing environments.
+
 CVD coordinates lifecycle actions. It does not prescribe how infrastructure is
 provisioned or introduce its own infrastructure definition language. Preserve
 existing project configuration by default.
+
+## Project layout and paths
+
+A selected `cvd.yaml` or `cvd.yml` is the entry point for a test configuration.
+Its containing directory is the **project directory**, including when the
+infrastructure code lives elsewhere. A configuration describes a test flow
+using scenarios; a **run** is one invocation executing the selected scenarios.
+
+Support two idiomatic layouts:
+
+- A configuration at the infrastructure project's root, alongside playbooks,
+  modules, tests, and CI configuration, describes one flow of sequential or
+  nested scenarios.
+- Separate directories, each with its own configuration, inventory, playbooks,
+  and tests, describe independent flows such as `simple` and `extended`.
+  Relative references such as `../..` allow test code to stay separate from
+  production code. Select a flow with `cvd run -F simple` or
+  `cvd run -F extended`.
+
+Related checks should normally reuse playbooks within one configuration's
+sequential or nested scenarios. Nesting also lets checks share a parent's live
+resources. Independent flow directories do not require shared create/destroy
+playbooks.
+
+Resolve top-level inventory paths relative to the root configuration directory.
+Resolve scenario includes relative to the including file, and Ansible playbook
+and pytest paths relative to the file declaring the scenario. Convert these
+CVD-managed paths to absolute paths before adapter invocation. Adapter-owned
+input remains opaque: strings in `vars` and literal `pytest.args` are not
+recursively interpreted as paths.
+
+These rules let callers select a configuration from another directory without
+changing their shell's working directory. Ansible and pytest subprocesses run
+from the root configuration directory, providing a consistent location for
+project configuration discovery and relative references inside user code.
 
 ## Core concepts
 
@@ -52,6 +92,12 @@ either an inline scenario body or an `include` path. An included file contains
 one scenario body and resolves relative to the including file. An entry cannot
 combine `include` with inline phases, verification, or children. Names form
 stable slash-separated scenario paths.
+
+Without a scenario selector, root scenarios execute sequentially in declaration
+order. Each scenario finishes its applicable cleanup and destruction before
+the next sibling starts; an execution error stops later siblings. Directory
+layout alone does not establish nesting: the `nested` declarations define the
+scenario hierarchy.
 
 ### Resource
 
@@ -159,9 +205,15 @@ after failure or interruption. Incremental checkpoint semantics remain deferred.
 
 Ansible owns inventory interpretation, including inventory plugins, groups,
 `group_vars`, `host_vars`, and variable precedence. CVD does not define an
-alternative inventory language. Optional top-level `inventory` is an ordered
-list of inventory source paths (files, directories, or scripts), resolved
-relative to the root CVD configuration:
+alternative inventory language. Preserve the project's `ansible.cfg` and
+inherited `ANSIBLE_CONFIG`; CVD does not generate a replacement configuration
+or override the user's configuration selection. Its inventory environment and
+reserved `cvd` inputs provide the lifecycle integration while Ansible retains
+control of its other settings.
+
+Optional top-level `inventory` is an ordered list of inventory source paths
+(files, directories, or scripts), resolved relative to the root CVD
+configuration:
 
 ```yaml
 inventory: [inventory.yml]
@@ -221,6 +273,10 @@ attributes:
 defaulting to empty. These are the only binding fields. Resource identity and
 ownership remain independent of inventory identity. Resources without this
 binding, such as networks or volumes, do not enter the generated inventory.
+
+Bound hosts can represent physical servers, virtual machines, containers, or
+pseudohosts used to call APIs. Inventory participation depends on the explicit
+binding rather than on a particular resource type.
 
 Before each Ansible `prepare`, `converge`, or `cleanup` invocation, and before
 each Ansible or pytest test in `verify`, CVD generates
@@ -330,7 +386,8 @@ are injected automatically; ordinary pytest tests are also supported.
 
 CVD sets `ANSIBLE_INVENTORY` for each pytest process using the same source order
 as Ansible playbooks: inherited environment sources, explicit CVD sources,
-then the scenario's runtime overlay, if any. Ansible defaults are resolved
+then the scenario's runtime overlay, if any. A separate inventory snippet
+containing the current `cvd` context is appended last. Ansible defaults are resolved
 through `ansible-config` when inherited and explicit sources are absent.
 Original sources remain at their own paths, retaining group and
 host variable files. Testinfra's `ansible://` backend consumes this environment
@@ -345,6 +402,37 @@ The overlay is freshly derived before verification, including when converge
 was omitted and when a selected child inherits parent resources. Its path is
 persisted as a view before launching pytest. External inventory hosts remain
 available without becoming provisioner-owned resources.
+
+### CVD context in Testinfra
+
+Before each named pytest invocation, CVD generates a private inventory snippet
+with `all.vars.cvd`. Testinfra tests using the `ansible://` backend access it
+with `host.ansible.get_variables()["cvd"]`; no CVD-specific Python fixture or
+plugin is required. Inventory transport uses Testinfra's existing variable
+interface and keeps the original inventory files intact.
+
+The context uses the same protocol-v1 fields as Ansible playbook input:
+`protocol_version`, a fresh `invocation_id`, `directory`, `input_file`,
+`result_file`, `action: verify`, `scenario_selector`, `vars`, `resources`, and
+`resources_by_type`. Pytest currently has no configured `vars` field, so
+`cvd.vars` is an empty mapping. Resource views include all existing resources
+visible to the current scenario, ancestors first, including non-host resources;
+unrelated siblings and destroyed resources are excluded. Each named test gets
+its own context, even when several tests belong to the same scenario.
+
+The snippet defines variables only: it introduces no hosts, groups beyond
+Ansible's built-in `all`, or connection settings. It is supplied even when
+there are no runtime host bindings or no CVD-owned resources. Ansible's normal
+inventory variable precedence applies; `cvd` remains a reserved name and
+user inventory must not override it. Tests using other Testinfra backends do
+not gain an Ansible variable interface from this snippet.
+
+The snippet and a JSON input file containing the same top-level `cvd` mapping
+live in a private per-invocation directory (0700, files 0600). They remain
+available while pytest runs and are removed after success, failure, or a launch
+error. The result path is supplied for context consistency; pytest does not
+publish a result file. These files are transient invocation inputs rather than
+persisted resource views, preventing reuse of stale test-specific context.
 
 For this initial adapter, exit zero is `pass`; **every nonzero pytest exit is
 `error`**, including assertion failures, collection/internal errors, interruption,
@@ -462,6 +550,13 @@ The initial version does not require:
 - compatibility abstractions for every test framework.
 
 A Molecule migration guide can be written separately.
+
+## Planned examples
+
+Provide an Ansible-driven virtual-machine showcase demonstrating integration
+tests against actual VMs, including creation, convergence, verification, and
+destruction. This is planned example coverage; the VM provider and example
+implementation remain to be chosen.
 
 ## Deferred decisions
 

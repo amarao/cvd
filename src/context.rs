@@ -116,7 +116,12 @@ fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
         .mode(0o600)
         .open(path)
         .and_then(|mut file| file.write_all(data))
-        .map_err(|error| format!("cannot write CVD context file `{}`: {error}", path.display()))
+        .map_err(|error| {
+            format!(
+                "cannot write CVD context file `{}`: {error}",
+                path.display()
+            )
+        })
 }
 
 pub(crate) fn resources_by_type(resources: &[Resource]) -> BTreeMap<&str, Vec<&Resource>> {
