@@ -6,16 +6,15 @@ The state file records enough information to inspect a run, recover cleanup,
 and later support interactive phase repetition. It is CVD-owned data, not a
 user-edited configuration file.
 
-## Recommended location
+## Current storage layout
 
-For the dummy stub, default to:
+Default to:
 
 ```text
 <project-root>/.cvd/runs/<run-id>/state.json
 ```
 
-For the stub, `project-root` is the directory containing the selected CVD
-configuration file.
+`project-root` is the directory containing the selected CVD configuration file.
 
 `<project-root>/.cvd/last-run` atomically stores the most recently started run
 ID followed by a newline. `cvd state-view`, `cvd state-resources`, and
@@ -25,16 +24,9 @@ explicit run IDs are restricted to one safe path component.
 Also support `--state-dir DIR`. Projects using the default should ignore
 `.cvd/` in version control.
 
-The project-local default is easy to discover and naturally associates state
-with the tested project. Each invocation creates a new run file and does not
-overwrite completed history. CVD writes initial state first, then updates
-`last-run`, so an interrupted newest run remains inspectable.
-
-An OS user-state directory such as
-`$XDG_STATE_HOME/cvd/<project-id>/runs/<run-id>/state.json` avoids writing into
-the source tree and should be evaluated before the state format becomes stable.
-It requires a defined, stable project identity and discovery command, so it is
-not required for the dummy stub.
+Each invocation creates a new run file without overwriting history. Persist
+initial state before updating `last-run`, so interrupted runs remain inspectable.
+The final default location and stable project identity remain deferred.
 
 ## Minimal persisted data
 
@@ -64,16 +56,15 @@ Internal execution status is `pending` or `running`. A completed phase result is
 - Write a temporary file in the state directory, flush it, and atomically rename
   it over the state file.
 - Create parent directories when needed.
-- Atomically update `last-run` only after initial state persistence succeeds.
 - Reject unsupported schema versions rather than guessing.
 - Treat a loaded `running` phase as interrupted; report it without silently
   retrying it.
 - `state-report` reads only persisted state and replays the live scenario
   report layout. Roots and siblings use deterministic lexical path order;
-  declaration order is not persisted by the dummy schema.
+  declaration order is not persisted.
 - Never discard the primary error when destruction also fails.
-- Redact sensitive resource attributes before serialization. The dummy has no
-  sensitive attributes, but the state shape must allow redaction later.
+- Redact sensitive resource attributes before serialization. This requirement
+  is not yet implemented; `sensitive_attributes` currently only records metadata.
 
 ## Ansible inventory views
 
@@ -85,11 +76,12 @@ so adapters never destroy them and resource change counts exclude them.
 
 The directory is private (0700), and the overlay is written atomically with
 0600 permissions. Its host data is derived from persisted live ancestor and
-scenario resources before each Ansible converger invocation or pytest test. The view path is
-saved before launching Ansible. It remains available after destruction as a
-record of the last rendered inventory, not a live resource-existence query.
-The optional field is additive to schema version 3; older records load with no
-views. Original inventory sources and their variable files are not copied.
+scenario resources before each Ansible converger invocation or Ansible/pytest
+test. Save the view path before launching the adapter. It remains available
+after destruction as a record of the last rendered inventory, not a live
+resource-existence query. Within schema version 3, records without the optional
+field load with no views. Original inventory sources and variable files are
+not copied.
 Do not report credentials in resource manifests: encrypted secret persistence
 and external secret references remain deferred.
 

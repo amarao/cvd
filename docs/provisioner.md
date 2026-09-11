@@ -15,7 +15,8 @@ removes or releases those resources after cleanup. Omitted phases are skipped.
 
 Children scenarios can use parent resources but create/destroy only the resources
 they add. Their cleanup and destruction finish before the parent's.
-If create or later work fails, CVD still attempts configured cleanup and destruction.
+After create fails, CVD attempts configured destruction. Cleanup also runs
+after later failures when create succeeded or was skipped.
 
 ## Provisioner contract
 
@@ -40,22 +41,20 @@ from inventory or creation input.
 ### Playbook input
 
 Playbook paths are relative to the scenario file. CVD runs playbooks from the
-root configuration directory (directory with `cvd.yaml`).
-Create playbook uses the original inventory from cvd.yaml. Destroy playbook
-uses a dedicated inventory of recorded owned hosts. Ansible configuration
+root configuration directory. Playbook paths must exist when configuration is
+loaded. Create uses the original inventory selected by CVD configuration or
+Ansible defaults. Destroy uses a dedicated inventory of recorded owned hosts. Ansible configuration
 still applies. Each phase may have its own optional `vars` section.
 
-Note: `cvd` variable and `cvd_` prefix are reserved for CVD use, don't set or
-change those variables to avoid breakage. Future versions may introduce new variables
-with `cvd_` prefix.
+`cvd` and the `cvd_` prefix are reserved; do not set or modify them.
 
-CVD supplies `cvd` as an Ansible extra variable into create and destroy playbooks.
+CVD supplies `cvd` through a private JSON file using `--extra-vars @FILE`.
 During destroy, each managed host also has the inventory variable `cvd_resource`:
 
 | Variable | Meaning |
 | --- | --- |
 | `cvd.protocol_version` | Protocol version; currently `1`. |
-| `cvd.directory` | Always supplied: the absolute directory containing the root CVD configuration file. |
+| `cvd.directory` | Absolute directory containing the selected root CVD configuration file; shared by included/nested scenarios. |
 | `cvd.input_file` | Path to the JSON input containing the top-level `cvd` mapping. |
 | `cvd.result_file` | Path where create playbook must write its JSON result. |
 | `cvd.invocation_id` | Identifier for this invocation; copy it into the create result. |
@@ -77,16 +76,15 @@ remain available. The controller also receives these environment variables:
 | `CVD_INVOCATION_ID` | Same value as `cvd.invocation_id`. |
 
 In playbooks, use `cvd.input_file`, `cvd.result_file`, and `cvd.invocation_id`
-directly. The environment variables remain available for scripts. These values
-are supplied to both provisioner and converger playbooks; file paths are valid
-only for the current invocation. `cvd.directory` refers to the project directory
-(the directory with `cvd.yaml` file).
+directly, or use the environment variables in scripts. All Ansible invocations
+receive these fields. Exchange files live in a private per-call directory and
+are removed after the call; `cvd.directory` is the project directory.
 
 A supplied result path does not mean a result file is required during destroy or convergence.
 
 ### Resources manifest (create output)
 
-Create playbook need to write one JSON document to `cvd.result_file` (for example,
+The create playbook writes one JSON document to `cvd.result_file` (for example,
 `dest: "{{ cvd.result_file }}"` in a `copy` task) containing:
 
 | Field | Required value |
@@ -98,15 +96,17 @@ Create playbook need to write one JSON document to `cvd.result_file` (for exampl
 
 Each resource requires a nonempty `id` and `type`. IDs must be unique within
 the result and identify the actual objects that destroy will remove or
-release. An optional `attributes` mapping carries additional data. CVD adds
-ownership, existence, and creation/destruction metadata.
+release. Optional fields are an `attributes` mapping, `relationships` list,
+and `sensitive_attributes` list. Do not include credentials: secret persistence
+is deferred. CVD adds ownership, existence, and creation/destruction metadata.
 
 Publish the aggregate result once, on the controller, using
 `ansible.builtin.copy` or `ansible.builtin.template` with atomic writes enabled.
 Do not enable `unsafe_writes` or let individual hosts overwrite each other's
-results. A failed playbook or missing, malformed, incomplete, or mismatched
-result makes create fail. Resources created before a result is successfully
-accepted cannot yet be recovered automatically.
+results. A failed playbook or a missing, malformed, incomplete,
+mismatched-invocation, or unsupported-version result makes create fail.
+Resources created before a result is accepted cannot yet be recovered
+automatically.
 
 ### Inventory host bindings
 
@@ -163,7 +163,9 @@ appropriate list without a type-filtering `when`:
 
 `cvd.resources` remains available for generic operations. Both the managed group and that list can be empty. Tolerate
 objects already gone. If a malformed binding has no usable host name, its
-resource appears in `cvd.resources`; duplicate names get unique destroy aliases.
+resource appears in `cvd.resources`; duplicate names get unique `__cvd_N`
+destroy aliases. IDs and recorded attributes remain unchanged. Host and
+non-host order each follow manifest order.
 Always use the recorded resource ID for removal.
 
 Return success only when all applicable objects are removed or released. CVD
