@@ -1,21 +1,33 @@
-Work in progress.
+# CVD
+
+CVD is Converge - Verify - Destroy tool, allowing to run integration
+tests for IaaC (Infrastructure as a code) code.
+
+*Note: Work in progress.*
+
+## Motivation
 
 I want to have something better than Molecule and more flexible than Vagrant.
 
-Also, I want to handle VMs and kubernetes resources on equal ground.
+Also, I want to handle VMs, Terraform and Kubernetes resources on equal ground.
 
-I know what I want, but llm is writing, under tight supervision and
+I know what I want, but writing is delegatged to LLMs, under tight supervision and
 good integration test coverage.
 
-If it will work out, I will announce, if not, I will archive.
+If it will work out, I will announce it, if not, I will archive.
 
-See [Writing an Ansible provisioner](docs/provisioner.md) for the playbook
-contract, supplied variables, and create/destroy protocol.
+## Current status
 
-Use `cvd run -F path/to/project` to discover `cvd.yaml` or `cvd.yml` in the
-project directory, or `-f path/to/config.yml` for an explicit file. When both
-names exist, `cvd.yaml` takes precedence. `-F` also works with state commands.
+I did few iterations of `cvd.yaml` structure, got ansible-pytest working together.
 
-Use `cvd syntax-check -F path/to/project` (or `--file path/to/config.yml`) to
-validate configuration syntax, schema, and referenced files without executing
-the scenario.
+There is general okayish for provisioner (create/destroy), for converger (converge) and
+for verifier (well, tests). Verifier is already ansible and pytest.
+
+## Plans
+
+* Make a showcase with VMs (ansible)
+* Look deeper at nested scenarios. I still in doubts what is 'nested scenario'. Should it be nested dict or should it be nested directory?
+* Start working on Terraform integration. Specifically, I'm interested in Terraform provisioner (and inventory generation). Also, how
+do we describe 'what to create' in cvd.yaml for terraform? Gonna be fun.
+* Make a round with Kubernetes as converger. I don't see any issues with that (just generate kube.conf)
+

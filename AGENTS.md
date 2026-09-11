@@ -16,3 +16,5 @@ REQUIREMENTS.md takes precedence if they conflict.
 - Preserve user changes and do not edit generated output in `target/`.
 - Run the narrowest relevant checks first. For Rust changes, run `cargo fmt`
   and `cargo test` when applicable.
+- `README.md` must not be edited by agents. If you see outdated info or
+  problems, report back.
