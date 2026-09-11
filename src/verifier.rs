@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use crate::{
     config::{DummyStatus, Test},
+    context::Invocation,
     state::VerifierStatus,
 };
 
@@ -93,6 +94,20 @@ impl Verifier for RuntimeVerifier {
         let inventory = self
             .inventory
             .environment(overlay)
+            .map_err(|error| VerifierError(error.to_string()))?;
+        let invocation = Invocation::create().map_err(VerifierError)?;
+        let vars = serde_json::json!({});
+        let input = invocation
+            .write_input(
+                &self.working_directory,
+                "verify",
+                scenario_path,
+                &vars,
+                resources,
+            )
+            .map_err(VerifierError)?;
+        let context_inventory = invocation.write_inventory(&input).map_err(VerifierError)?;
+        let inventory = crate::inventory::inventory_environment(inventory, &[context_inventory])
             .map_err(|error| VerifierError(error.to_string()))?;
         let status = Command::new("pytest")
             .args(&pytest.args)

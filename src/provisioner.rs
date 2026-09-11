@@ -3,22 +3,19 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
-    process::{self, Command},
-    sync::atomic::{AtomicU64, Ordering},
+    process::Command,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use thiserror::Error;
 
 use crate::{
     config::{DummyStatus, PhaseDefinition},
+    context::Invocation,
     state::{LifecyclePhase, Resource, ResourceLocation, ResourceManifest},
 };
 
-static NEXT_EXCHANGE: AtomicU64 = AtomicU64::new(0);
-const PROTOCOL_VERSION: u32 = 1;
 const MANIFEST_VERSION: u32 = 1;
 
 pub trait Provisioner {
@@ -146,34 +143,22 @@ impl AnsibleProvisioner {
         expect_result: bool,
         overlay: Option<&std::path::Path>,
     ) -> Result<Option<CreateResult>, ProvisionerError> {
-        let exchange = Exchange::create()?;
+        let exchange = Invocation::create().map_err(ProvisionerError)?;
         let (destroy_inventory, other_resources) = destroy_targets(scenario_path, resources);
         let resources = if action == "destroy" {
             other_resources.as_slice()
         } else {
             resources
         };
-        let input = AnsibleInput {
-            cvd: CvdInput {
-                protocol_version: PROTOCOL_VERSION,
-                invocation_id: &exchange.invocation_id,
-                input_file: &exchange.input,
-                result_file: &exchange.result,
-                directory: &self.working_directory,
+        exchange
+            .write_input(
+                &self.working_directory,
                 action,
-                scenario_selector: scenario_path,
-                vars: &definition.vars,
+                scenario_path,
+                &definition.vars,
                 resources,
-                resources_by_type: resources_by_type(resources),
-            },
-        };
-        fs::write(
-            &exchange.input,
-            serde_json::to_vec_pretty(&input).map_err(|error| {
-                ProvisionerError(format!("cannot encode Ansible input: {error}"))
-            })?,
-        )
-        .map_err(|error| ProvisionerError(format!("cannot write Ansible input: {error}")))?;
+            )
+            .map_err(ProvisionerError)?;
 
         let mut command = Command::new("ansible-playbook");
         if action == "destroy" {
@@ -313,25 +298,6 @@ impl Provisioner for AnsibleProvisioner {
     }
 }
 
-#[derive(Serialize)]
-struct AnsibleInput<'a> {
-    cvd: CvdInput<'a>,
-}
-
-#[derive(Serialize)]
-struct CvdInput<'a> {
-    protocol_version: u32,
-    invocation_id: &'a str,
-    input_file: &'a std::path::Path,
-    result_file: &'a std::path::Path,
-    directory: &'a std::path::Path,
-    action: &'static str,
-    scenario_selector: &'a str,
-    vars: &'a serde_json::Value,
-    resources: &'a [Resource],
-    resources_by_type: BTreeMap<&'a str, Vec<&'a Resource>>,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateResult {
@@ -353,42 +319,6 @@ struct ReportedResource {
     relationships: BTreeSet<String>,
     #[serde(default)]
     sensitive_attributes: BTreeSet<String>,
-}
-
-struct Exchange {
-    directory: PathBuf,
-    input: PathBuf,
-    result: PathBuf,
-    invocation_id: String,
-}
-
-impl Exchange {
-    fn create() -> Result<Self, ProvisionerError> {
-        let sequence = NEXT_EXCHANGE.fetch_add(1, Ordering::Relaxed);
-        let invocation_id = format!("{}-{sequence}", process::id());
-        let directory = std::env::temp_dir().join(format!("cvd-ansible-{invocation_id}"));
-        fs::create_dir(&directory).map_err(|error| {
-            ProvisionerError(format!(
-                "cannot create Ansible exchange directory `{}`: {error}",
-                directory.display()
-            ))
-        })?;
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            ProvisionerError(format!("cannot secure Ansible exchange directory: {error}"))
-        })?;
-        Ok(Self {
-            input: directory.join("input.json"),
-            result: directory.join("result.json"),
-            directory,
-            invocation_id,
-        })
-    }
-}
-
-impl Drop for Exchange {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.directory);
-    }
 }
 
 #[derive(Debug, Error)]
@@ -431,20 +361,10 @@ fn destroy_targets(scenario: &str, resources: &[Resource]) -> (serde_json::Value
     )
 }
 
-fn resources_by_type(resources: &[Resource]) -> BTreeMap<&str, Vec<&Resource>> {
-    let mut grouped = BTreeMap::new();
-    for resource in resources {
-        grouped
-            .entry(resource.resource_type.as_str())
-            .or_insert_with(Vec::new)
-            .push(resource);
-    }
-    grouped
-}
-
 #[cfg(test)]
 mod destroy_tests {
     use super::*;
+    use crate::context::resources_by_type;
 
     #[test]
     fn create_manifest_requires_manifest_version() {
