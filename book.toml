@@ -1,0 +1,15 @@
+# Preview with `mdbook serve` using the version pinned in the Pages workflow.
+[book]
+title = "CVD Documentation"
+description = "Integration testing for infrastructure as code with CVD."
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "book"
+# Fail on missing chapters so broken navigation is caught during CI builds.
+create-missing = false
+
+[output.html]
+site-url = "/cvd/"
+git-repository-url = "https://github.com/amarao/cvd"

@@ -1,4 +1,5 @@
 /target
+/book/
 /.cvd
 **/.cvd/
 **/__pycache__/
