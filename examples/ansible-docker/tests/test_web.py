@@ -1,6 +1,6 @@
 """Read the runtime inventory with Testinfra and verify HTTP from the controller."""
 
-from urllib.request import ProxyHandler, build_opener
+from urllib.request import build_opener, ProxyHandler
 
 
 testinfra_hosts = ["ansible://webservers"]
