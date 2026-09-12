@@ -11,5 +11,6 @@ Nicer ways to install be added when CVD is ready for public release.
 
 ## Hello world, infra way
 
-(It's assumed you have cvd available in your system path, so you can run `cvd` directly).
+(It's assumed that you have cvd available in your system path, so you can run `cvd` directly).
 
+We will create a container and run our production playbook.

@@ -11,7 +11,7 @@ There are a few ways to instruct CVD to keep resources after creation:
 
 1. `--keep` command line option to keep created resources (destroy phase is skipped).
 2. During a run it's possible to send a unix signal (`kill` utility) to switch between
-   keep and destroy modes.
+   keep and destroy modes (only when run on Linux/Unix):
    - `SIGUSR1` enables keep mode.
    - `SIGUSR2` disables keep mode.
 3. «not implemented yet» option in `cvd.yaml` «no name yet» adds a pause before destroy 

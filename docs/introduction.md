@@ -1,74 +1,69 @@
 # Introduction
 
 CVD (short for Create-Verify-Destroy) is a tool for implementing end-to-end integration
-tests for IaaC (infrastructure as a code). It gives an ability to run tests on
-ephimerial resources (hosts, virtual machines, clusters, even real servers).
+tests for IaaC (infrastructure as code). It provides the ability to run tests on
+ephemeral resources (hosts, virtual machines, clusters, even real servers).
 
-It's done via a well-known pattern of 'deploy on ephimerial staging'.
+It's done via a well-known pattern of 'deploy on ephemeral staging'. CVD helps to glue
+together 'create/destroy', converge and verify parts of this process.
+
+It is heavily influenced by (Molecule)[https://docs.ansible.com/projects/molecule/], but
+trying to overcome it's limitations (lack of nested scenarios, rigid structure, hard tool
+preferences).
 
 The foundational concepts are:
 
-* Production code: the code which will be deployed in the production. It can be
-  a playbook (with roles), or group of Helm charts, or Terraform modules, or combination
+* Production code: the code that will be deployed in production. It can be
+  a playbook (with roles), or a group of Helm charts, or Terraform modules, or a combination
   of those.
-* Ephimeral: created and destroyed. Ephimeral resources do not outlive a CVD run
-  (except for debugging purposes). That means, CVD is inherently not-for-production.
+* Ephemeral: created and destroyed. Ephemeral resources do not outlive a CVD run
+  (except for debugging purposes). This means CVD is inherently not for production.
   Do not use it for production deployments. Use it to test your code before doing production
   deployments.
-* Test rigs also known as 'preparation code'. A code which allow to adjust staging
-  ephimeral environment to be suitable for deploying production code (note: deploying
-  production code is not the same as deployment into production environment, CVD is build
-  to deploy production code into non-production environments). Example of such may be
+* Test rigs, also known as 'preparation code'. Code that allows adjusting staging
+  ephemeral environments to be suitable for deploying production code (note: deploying
+  production code is not the same as deployment into a production environment; CVD is built
+  to deploy production code into non-production environments). Examples may include
   updating network configuration, providing stub implementations for external systems,
-  cleaning apt caches, adding other team members ssh keys in non-production way (e.g. for
-  debugging only), etc.
-* Convergence: running production code to get to the expected state. In the ideal world
-  convergence must be idempotent, that means, running it second time it should make no
-  changes. It also should be re-converngent (if some configuration drift is introduced,
+  cleaning apt caches, and adding other team members' SSH keys in a non-production way (e.g., for
+  debugging only).
+* Convergence: running production code to achieve the expected state. In the ideal world,
+  convergence must be idempotent, meaning running it a second time should make no
+  changes. It should also be re-convergent (if some configuration drift is introduced,
   it should converge back to the expected state).
-* Tests (this phase is often called 'verify'), which checks that system is in the expected
-  state. Tests can be mutating (e.g. try to run container to see if Podman is working),
-  or they can be smoke tests (e.g. check if site displays something instead of 'Welcome to Nginx').
-* Side effect: something happening with converged system. Examples of such may be
-  'hard reboot for all cluster' (we want to test that system boot back after total
-  outage) in working state, or 'adding/removing nodes', 'adding user'.
+* Tests (this phase is often called 'verify') that check the system is in the expected
+  state. Tests can be mutating (e.g., running a container to see if Podman is working),
+  or they can be smoke tests (e.g., checking if the site displays something instead of 'Welcome to Nginx').
+* Side effect: something that happens to a converged system. Examples may include
+  a hard reboot of the entire cluster (we want to test that the system boots back after a total
+  outage) from a working state, or adding/removing nodes, or adding a user.
 * Scenario: convergence and chain of side effects (maybe, with some tests in between).
 
 ## Example
 
-Let's say we are doing full-scale testing for our deployment of kubespray and
-system components into a cluster. It's not a plain 'kubernetes', it's a Kubernetes
-with additional components (Rook, Velero, etc).
+Let's say we are doing full-scale testing for our deployment of Kubespray and
+some components into Kubenetes cluster. It's not a plain Kubernetes; it's Kubernetes
+with additional components (Rook, Velero, Prometheus).
 
-* We `create` our ephimeral infrastructure. We order some scalable baremetal servers.
-* We `prepare` them (our ephimeral infrastructure is build on cheaper servers, so we
-  need to imitate that we have a lot of disks for Rook, we create few LVs on a VG
-  build on a single drive).
-* We `converge` Kubespray and few helms which we expect to have.
-* We `verify` that we got working cluster. We create a deployment, run Velero
-  backup, get confirmation that it's backed up, and, maybe, even restore this deployment
-  into other namespace. And we check that restored application is accessible via
+* We `create` our ephemeral infrastructure. We order few scalable baremetal servers.
+* We `prepare` them (our ephemeral infrastructure is built on cheaper servers, so we
+  need to simulate having many disks for Rook; we create a few LVs on a VG
+  built on a single drive). CVD generate an inventory with connection information for
+  newly created servers.
+* We `converge` (install) Kubespray and the deploy Helm charts into it.
+* We `verify` that we have a working cluster. We create a deployment, run a Velero
+  backup, confirm that it's been backed up, and then restore this deployment
+  into another namespace. We verify that the restored application is accessible via
   ingress (so our SSL code is provisioning certificates as expected).
-* We introduce some `side-effect` (`echo b > /proc/sysrq-trigger`, kinda cruel, but
-  really imitating a brief outage).
-* We check that we alerts from Prometheus that some nodes are down.
-* We also check that those alerts stop firing, that means, cluster is come back alive.
-* And we check other 3102 aspects of our system (logs are collected, there are no
-  failed systemd units, Ceph cluster is healthy, you name it).
+* We introduce a `side-effect` (`echo b > /proc/sysrq-trigger`, admittedly harsh, but
+  truly simulating a brief outage).
+* We verify that we receive alerts from Prometheus indicating that some nodes are down.
+* We also verify that those alerts stop firing, meaning the cluster has come back online.
+* We verify other aspects of our system (logs are collected, there are no
+  failed systemd units, Ceph cluster is healthy, and so on).
 * We run some `cleanup` code
-* Finally, we `destroy` our ephimeral infrastructure (cancelling baremetal servers we've
-  ordered at create phase).
+* Finally, we `destroy` our ephemeral infrastructure (cancelling baremetal servers we've
+  ordered at create phase). It will happen even if there are failed tests.
+* CVD reports results (success, failure) for the run.
 
-All this with a simple `cvd run` command.
-
-Let's assume some of our tests failed (let's say we got no alert that node is down when we
-reboot it, and Grafana is down after reboot). We got 'red tests'. CVD record the issue,
-allow other tests to pass (to get all found problems in one go), and run cleanup.
-
-After that it reports that some tests are failed and exit with non-zero exit code to
-fail your CI, or your local run.
-
-CVD is also allows to keep ephimeral infra for future debugging (`--keep` flag or
-`SIGUSR1` signal to the cvd process).
-
-
+All this happens with a simple `cvd run` command.
