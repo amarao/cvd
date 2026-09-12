@@ -261,6 +261,13 @@ impl RunState {
         self.touch();
     }
 
+    pub fn set_keep(&mut self, keep: bool) {
+        if self.keep != keep {
+            self.keep = keep;
+            self.touch();
+        }
+    }
+
     pub fn mark_phase_running(&mut self, scenario_path: &str, phase: LifecyclePhase) {
         self.scenario_mut(scenario_path)
             .phases

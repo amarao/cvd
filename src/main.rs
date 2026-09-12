@@ -3,6 +3,7 @@ mod config;
 mod context;
 mod converger;
 mod inventory;
+mod keep;
 mod lifecycle;
 mod provisioner;
 mod state;
@@ -28,6 +29,7 @@ use crate::{
     },
     config::Config,
     converger::AnsibleConverger,
+    keep::KeepMode,
     lifecycle::{LifecycleError, LifecycleRunner, render_state_report},
     provisioner::AnsibleProvisioner,
     state::{RunState, StateError, StateRepository, StateRepositoryError, default_state_directory},
@@ -36,6 +38,9 @@ use crate::{
 
 #[derive(Debug, Error)]
 enum AppError {
+    #[cfg(unix)]
+    #[error("could not install keep-mode signal handlers: {0}")]
+    KeepSignals(#[source] io::Error),
     #[error(transparent)]
     Configuration(#[from] config::ConfigError),
     #[error(transparent)]
@@ -106,6 +111,12 @@ fn load_configuration(file: &std::path::Path) -> Result<(PathBuf, Config), AppEr
 }
 
 fn run(args: RunArgs) -> Result<(), AppError> {
+    let keep_mode = KeepMode::new(args.keep);
+    #[cfg(unix)]
+    let _keep_signals = keep_mode
+        .register_signals()
+        .map_err(AppError::KeepSignals)?;
+
     let file = cli::configuration_file(&args.file, args.directory.as_deref());
     let (configuration_path, configuration) = load_configuration(&file)?;
     let repository = StateRepository::new(
@@ -124,7 +135,7 @@ fn run(args: RunArgs) -> Result<(), AppError> {
         configuration_path.clone(),
         fingerprint(configuration.source_material()),
         args.scenario.clone(),
-        args.keep,
+        keep_mode.enabled(),
     );
     // Publishing `last-run` happens only after this initial state is durable,
     // making an interrupted newest run inspectable without overwriting history.
@@ -162,6 +173,7 @@ fn run(args: RunArgs) -> Result<(), AppError> {
         &verifier,
         output,
     )
+    .with_keep_mode(keep_mode)
     .with_styled_output(styled_output)
     .run(args.scenario.as_deref())?;
 

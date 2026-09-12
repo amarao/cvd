@@ -504,6 +504,39 @@ Cleanup is stack-based and is best-effort:
 Current `--keep` suppresses destruction only; suppressing cleanup remains
 unimplemented.
 
+### Changing keep mode during a run
+
+On Unix, `cvd run` handles `SIGUSR1` to enable keep mode and `SIGUSR2` to
+disable it. `--keep` selects the initial value; either signal can override
+that value while the run is executing, including while CVD waits for an
+Ansible or pytest subprocess. Send signals to the CVD process PID, not its
+subprocesses or process group. Other commands do not install these handlers.
+
+Signals set a run-wide policy, rather than toggling it: repeated `SIGUSR1`
+keeps it enabled, and repeated `SIGUSR2` keeps it disabled. The most recently
+handled signal determines the policy for upcoming destruction decisions.
+Ordinary Unix signal delivery applies; these signals are not a queued command
+protocol.
+
+Check the current policy separately when entering each scenario's `destroy`
+phase, including error unwinding, ancestor destruction, and later siblings or
+roots. Enabled keep mode records that destruction as `skipped`, retaining
+the scenario's resource existence records. Disabling it restores ordinary
+ownership-scoped destruction for subsequent destroy phases. Cleanup continues
+under either setting. Signals themselves are not failures and do not alter
+recorded verifier results or errors.
+
+A destroy phase already entered runs to completion. Enabling keep cannot
+cancel that destruction or restore deleted resources. Disabling keep does not
+revisit destruction already skipped for an earlier scenario. This boundary
+preserves provider execution and lifecycle ordering while allowing operators
+to retain resources when they discover a problem during a long-running phase.
+
+Signal handlers only update the live policy. The next normal lifecycle state
+write, including the final write, snapshots it into the existing `keep` field
+as described in [state.md](state.md). This keeps state persistence in the
+lifecycle thread and avoids filesystem operations inside signal handlers.
+
 ## State and reporting
 
 [state.md](state.md) defines persisted data, run history, and atomic writes.

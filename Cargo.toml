@@ -10,3 +10,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_yaml = "0.9"
 thiserror = "2.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+signal-hook-registry = "1.4"

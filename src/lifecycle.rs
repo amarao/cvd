@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::{
     config::{Config, ConfiguredPhase, Scenario},
     converger::Converger,
+    keep::KeepMode,
     provisioner::Provisioner,
     state::{
         ErrorRecord, LifecyclePhase, PhaseStatus, RunState, ScenarioState, StateError, StateStore,
@@ -48,6 +49,7 @@ pub struct LifecycleRunner<'a, W: Write> {
     configuration: &'a Config,
     store: &'a StateStore,
     state: RunState,
+    keep_mode: KeepMode,
     provisioner: &'a dyn Provisioner,
     converger: &'a dyn Converger,
     verifier: &'a dyn Verifier,
@@ -69,6 +71,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         Self {
             configuration,
             store,
+            keep_mode: KeepMode::new(state.keep),
             state,
             provisioner,
             converger,
@@ -84,8 +87,20 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         self
     }
 
+    pub fn with_keep_mode(mut self, keep_mode: KeepMode) -> Self {
+        self.keep_mode = keep_mode;
+        self
+    }
+
+    fn persist(&mut self) -> Result<(), StateError> {
+        // Signal handlers only update the live policy. Keep one state writer
+        // and snapshot that policy at the existing lifecycle checkpoints.
+        self.state.set_keep(self.keep_mode.enabled());
+        self.store.save(&self.state)
+    }
+
     pub fn run(mut self, selector: Option<&str>) -> Result<(RunOutcome, RunState), LifecycleError> {
-        self.store.save(&self.state)?;
+        self.persist()?;
 
         let had_error = if let Some(selector) = selector {
             let segments: Vec<_> = selector.split('/').collect();
@@ -113,7 +128,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         if had_error {
             self.outcome.execution_errors += 1;
         }
-        self.store.save(&self.state)?;
+        self.persist()?;
         write_summary(&mut self.output, &self.state, &self.outcome)?;
         Ok((self.outcome, self.state))
     }
@@ -256,8 +271,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
                     self.store.path(),
                 )
                 .and_then(|inventory| {
-                    self.store
-                        .save(&self.state)
+                    self.persist()
                         .map(|_| inventory)
                         .map_err(|error| format!("cannot persist inventory view: {error}"))
                 })
@@ -289,7 +303,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
                             recorded_at: timestamp(),
                         },
                     );
-                    if self.store.save(&self.state).is_err() {
+                    if self.persist().is_err() {
                         return true;
                     }
                     if verifier_error {
@@ -322,7 +336,10 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
     }
 
     fn destroy(&mut self, scenario: &Scenario, path: &str) -> bool {
-        if self.state.keep || !scenario.has_phase(ConfiguredPhase::Destroy) {
+        // Decide separately for every scenario, including error unwinding.
+        // Once admitted, a destroy phase runs to completion even if a signal
+        // changes the policy during the provider call.
+        if self.keep_mode.enabled() || !scenario.has_phase(ConfiguredPhase::Destroy) {
             return self.skip(path, LifecyclePhase::Destroy).is_err();
         }
         let resources = self
@@ -399,7 +416,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
                 self.store.path(),
             ) {
                 Ok(inventory) => {
-                    if let Err(error) = self.store.save(&self.state) {
+                    if let Err(error) = self.persist() {
                         self.execution_error(
                             path,
                             phase,
@@ -447,7 +464,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         phase: LifecyclePhase,
     ) -> Result<(), LifecycleError> {
         self.state.mark_phase_running(path, phase);
-        self.store.save(&self.state)?;
+        self.persist()?;
         Ok(())
     }
 
@@ -459,7 +476,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
     ) -> Result<(), LifecycleError> {
         self.state
             .complete_phase(path, phase.clone(), status.clone());
-        self.store.save(&self.state)?;
+        self.persist()?;
         write_phase_result(
             &mut self.output,
             path,

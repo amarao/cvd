@@ -64,6 +64,24 @@ Internal execution status is `pending` or `running`. A completed phase result is
   declaration order is not persisted.
 - Never discard the primary error when destruction also fails.
 
+### Keep mode updates
+
+`keep` starts from `--keep` and records the latest live destruction policy
+sampled at a state write. On Unix, `SIGUSR1` enables that policy and `SIGUSR2`
+disables it during `cvd run`. Every normal lifecycle state write, including
+the final write, samples the live policy; a changed value also updates
+`updated_at`. Signals do not write state themselves. While an adapter is
+running, persisted `keep` can therefore lag the live setting until the next
+checkpoint. An interruption before that checkpoint can lose the policy update.
+
+Use the existing boolean without changing the state schema: the setting still
+describes destruction policy, now mutable during a run. Keeping a single state
+writer avoids racing a signal-driven write against phase/resource updates.
+No signal history is persisted. Phase statuses and resource existence records
+remain authoritative: a final `keep: false` can coexist with resources retained
+by an earlier skipped destroy, and `keep: true` can coexist with destruction
+that had already begun when the signal arrived.
+
 ## Ansible inventory views
 
 Scenario state optionally contains a `views` mapping. `ansible_inventory` is a

@@ -58,6 +58,7 @@ pub struct RunArgs {
     pub state_dir: Option<PathBuf>,
 
     /// Retain entered scenarios and skip destruction.
+    /// On Unix, SIGUSR1 enables keep mode and SIGUSR2 disables it during a run.
     #[arg(long)]
     pub keep: bool,
 }
