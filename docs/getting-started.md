@@ -1,9 +1,15 @@
 # Getting started
 
-With a Rust toolchain that supports edition 2024 installed, clone the CVD
-repository and run `cargo run --locked -- run -F examples/dummy` from its root
-to try a complete lifecycle without creating external infrastructure. The
-example's `cvd.yml` declares its phases and named tests, and the run records
-state under `examples/dummy/.cvd/`; inspect the result with
-`cargo run --locked -- state-report -F examples/dummy`. Use this example as a
-starting point before configuring Ansible playbooks and real resources.
+
+## Installation
+
+No nice ways to install it yet. Use Rust 2024 toolchain to `cargo install`.
+If you want to run it without installing, run 
+`cargo run --locked -- run -F path/to/your_cvd_dir`.
+
+Nicer ways to install be added when CVD is ready for public release.
+
+## Hello world, infra way
+
+(It's assumed you have cvd available in your system path, so you can run `cvd` directly).
+
