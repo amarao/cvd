@@ -41,7 +41,7 @@ jobs:
 
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: book
 
@@ -58,10 +58,11 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      # Select GitHub Actions as the publishing source in Settings > Pages.
+      # Enable Pages once in Settings > Pages with GitHub Actions as the source.
+      # The default GITHUB_TOKEN can deploy an existing site but cannot enable it.
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
