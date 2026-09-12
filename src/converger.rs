@@ -51,10 +51,9 @@ impl Converger for DummyConverger {
 #[error("{0}")]
 pub struct ConvergerError(pub String);
 
-/// Ansible converger with explicit dummy overrides.
+/// Dispatches convergence using the phase's adapter mapping.
 pub struct AnsibleConverger {
     pub runtime: crate::provisioner::AnsibleProvisioner,
-    pub default_is_ansible: bool,
 }
 
 impl Converger for AnsibleConverger {
@@ -82,10 +81,6 @@ impl Converger for AnsibleConverger {
             self.runtime
                 .converge(scenario_path, action, ansible, inventory, resources)
                 .map_err(|error| ConvergerError(error.to_string()))
-        } else if self.default_is_ansible && !definition.is_dummy_override() {
-            Err(ConvergerError(
-                "the Ansible converger requires an explicit `ansible` phase mapping".to_owned(),
-            ))
         } else {
             DummyConverger.run(
                 scenario_path,

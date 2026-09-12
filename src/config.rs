@@ -17,19 +17,12 @@ struct RawConfig {
     version: u32,
     #[serde(default)]
     inventory: Vec<PathBuf>,
-    #[serde(default)]
-    provisioner: Option<String>,
-    converger: String,
-    verifier: String,
     scenarios: NamedMap<RawScenario>,
 }
 
 #[derive(Debug)]
 pub struct Config {
     pub inventory: Vec<PathBuf>,
-    pub provisioner: String,
-    pub converger: String,
-    pub verifier: String,
     pub scenarios: ScenarioMap,
     source_material: String,
 }
@@ -63,13 +56,20 @@ pub(crate) struct PhaseDefinition {
 }
 
 impl PhaseDefinition {
-    pub(crate) fn is_dummy_override(&self) -> bool {
-        self._value.as_mapping().is_some_and(|mapping| {
-            mapping.contains_key(serde_yaml::Value::String("dummy".to_owned()))
-        })
-    }
-
     pub(crate) fn dummy_status(&self) -> DummyStatus {
+        if let serde_yaml::Value::Sequence(actions) = &self._value {
+            return if actions.iter().any(|action| {
+                let options = &action["dummy"];
+                parse_dummy_options(options)
+                    .expect("dummy action options are validated")
+                    .status
+                    == DummyStatus::Error
+            }) {
+                DummyStatus::Error
+            } else {
+                DummyStatus::Ok
+            };
+        }
         let serde_yaml::Value::Mapping(action) = &self._value else {
             return DummyStatus::Ok;
         };
@@ -132,17 +132,50 @@ pub enum ConfiguredPhase {
     Destroy,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Test {
-    #[serde(default)]
     pub(crate) ansible: Option<AnsiblePhaseDefinition>,
-    #[serde(default)]
     pub(crate) pytest: Option<PytestDefinition>,
-    #[serde(default)]
-    pub verifier: Option<String>,
-    #[serde(default)]
     pub(crate) status: DummyStatus,
+}
+
+impl<'de> Deserialize<'de> for Test {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = NamedMap::<serde_yaml::Value>::deserialize(deserializer)?.0;
+        if entries.len() != 1 {
+            return Err(de::Error::custom(
+                "a test must contain exactly one adapter name (dummy, ansible, or pytest)",
+            ));
+        }
+        let (adapter, options) = entries.into_iter().next().expect("length was checked");
+        let mut test = Self {
+            ansible: None,
+            pytest: None,
+            status: DummyStatus::Ok,
+        };
+        match adapter.as_str() {
+            "dummy" => {
+                test.status = parse_dummy_options(&options)
+                    .map_err(de::Error::custom)?
+                    .status;
+            }
+            "ansible" => {
+                test.ansible = Some(serde_yaml::from_value(options).map_err(de::Error::custom)?);
+            }
+            "pytest" => {
+                test.pytest = Some(serde_yaml::from_value(options).map_err(de::Error::custom)?);
+            }
+            _ => {
+                return Err(de::Error::custom(format!(
+                    "unsupported verifier adapter `{adapter}`"
+                )));
+            }
+        }
+        Ok(test)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -361,7 +394,7 @@ impl Config {
             let reason = if document.is_sequence() {
                 "expected a mapping at the document root, but found a sequence; this may be an Ansible playbook, so select cvd.yaml or cvd.yml instead."
             } else {
-                "expected a mapping at the document root with `version`, `converger`, `verifier`, and `scenarios` keys"
+                "expected a mapping at the document root with `version` and `scenarios` keys"
             };
             return Err(ConfigError::InvalidDocument { reason });
         }
@@ -391,9 +424,6 @@ impl Config {
             .collect::<Result<Vec<_>, _>>()?;
         let config = Self {
             inventory,
-            provisioner: raw.provisioner.unwrap_or_else(|| "dummy".to_owned()),
-            converger: raw.converger,
-            verifier: raw.verifier,
             scenarios,
             source_material,
         };
@@ -434,25 +464,7 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
-        validate_default("provisioner", &self.provisioner, &["dummy", "ansible"])?;
-        validate_default("converger", &self.converger, &["dummy", "ansible"])?;
-        validate_default("verifier", &self.verifier, &["dummy", "pytest", "ansible"])?;
-        validate_scenarios(self, &self.scenarios, None)
-    }
-}
-
-fn validate_default(
-    kind: &'static str,
-    implementation: &str,
-    supported: &[&str],
-) -> Result<(), ConfigError> {
-    if supported.contains(&implementation) {
-        Ok(())
-    } else {
-        Err(ConfigError::InvalidDefault {
-            kind,
-            reason: format!("unsupported implementation `{implementation}`"),
-        })
+        validate_scenarios(&self.scenarios, None)
     }
 }
 
@@ -644,80 +656,35 @@ fn collect_paths(scenarios: &ScenarioMap, parent: Option<&str>, paths: &mut Vec<
     }
 }
 
-fn validate_scenarios(
-    config: &Config,
-    scenarios: &ScenarioMap,
-    parent: Option<&str>,
-) -> Result<(), ConfigError> {
+fn validate_scenarios(scenarios: &ScenarioMap, parent: Option<&str>) -> Result<(), ConfigError> {
     for (name, scenario) in scenarios.iter() {
         let path = parent.map_or_else(|| name.clone(), |parent| format!("{parent}/{name}"));
         validate_name(name).map_err(|reason| ConfigError::InvalidScenario {
             path: path.clone(),
             reason,
         })?;
-        for (test_name, test) in scenario.tests.iter() {
+        for (test_name, _) in scenario.tests.iter() {
             let test_path = format!("{path}::{test_name}");
             validate_name(test_name).map_err(|reason| ConfigError::InvalidTest {
                 path: test_path.clone(),
                 reason,
             })?;
-            let verifier = test.verifier.as_deref().unwrap_or(&config.verifier);
-            let reason = match verifier {
-                _ if test.ansible.is_some() && verifier != "ansible" => {
-                    Some("Ansible options require the ansible verifier".to_owned())
-                }
-                "ansible" if test.pytest.is_some() => {
-                    Some("pytest options require the pytest verifier".to_owned())
-                }
-                "ansible" if test.ansible.is_none() => {
-                    Some("ansible verifier requires `ansible: {playbook: ...}`".to_owned())
-                }
-                "ansible" if test.status != DummyStatus::Ok => {
-                    Some("dummy status controls cannot be used with ansible".to_owned())
-                }
-                "ansible" => None,
-                "dummy" if test.pytest.is_some() => {
-                    Some("pytest options require the pytest verifier".to_owned())
-                }
-                "dummy" => None,
-                "pytest" if test.pytest.is_none() => {
-                    Some("pytest verifier requires `pytest: {path: ...}`".to_owned())
-                }
-                "pytest" if test.status != DummyStatus::Ok => {
-                    Some("dummy status controls cannot be used with pytest".to_owned())
-                }
-                "pytest" => None,
-                _ => Some(format!("unsupported implementation `{verifier}`")),
-            };
-            if let Some(reason) = reason {
-                return Err(ConfigError::InvalidTest {
-                    path: test_path,
-                    reason,
-                });
-            }
         }
-        validate_scenarios(config, &scenario.scenarios, Some(&path))?;
+        validate_scenarios(&scenario.scenarios, Some(&path))?;
     }
     Ok(())
 }
 
 fn validate_phase_value(value: &serde_yaml::Value, phase: ConfiguredPhase) -> Result<(), String> {
     match value {
-        serde_yaml::Value::Null
-        | serde_yaml::Value::Bool(_)
-        | serde_yaml::Value::Number(_)
-        | serde_yaml::Value::String(_) => Ok(()),
         serde_yaml::Value::Mapping(mapping) => validate_action_mapping(mapping, phase),
         serde_yaml::Value::Sequence(actions) => {
-            let strings = actions
-                .iter()
-                .all(|action| matches!(action, serde_yaml::Value::String(_)));
             let mappings = actions
                 .iter()
                 .all(|action| matches!(action, serde_yaml::Value::Mapping(_)));
-            if !strings && !mappings {
+            if !mappings || actions.is_empty() {
                 return Err(
-                    "a list must contain only scalar values or only adapter mappings".to_owned(),
+                    "a phase list must contain one or more adapter mappings".to_owned(),
                 );
             }
             if mappings {
@@ -735,7 +702,7 @@ fn validate_phase_value(value: &serde_yaml::Value, phase: ConfiguredPhase) -> Re
             }
             Ok(())
         }
-        serde_yaml::Value::Tagged(_) => Err("tagged YAML values are not supported".to_owned()),
+        _ => Err("a phase requires an explicit adapter mapping, such as `dummy: {}` or `ansible: {playbook: ...}`".to_owned()),
     }
 }
 
@@ -863,35 +830,41 @@ mod tests {
 
     const NESTED: &str = r#"
 version: 1
-provisioner: dummy
-converger: dummy
-verifier: dummy
 scenarios:
   default:
     create:
+      dummy:
     prepare:
       - dummy:
-    converge: site.yml
+    converge: {dummy: {}}
     cleanup:
+      dummy:
     destroy:
+      dummy:
     verify:
-      smoke: {}
+      smoke: {dummy: {}}
     nested:
       - name: restart
         create:
           dummy:
         converge:
+          dummy:
         verify:
         destroy:
+          dummy:
         nested:
           - name: after
             create:
+              dummy:
             verify:
             destroy:
+              dummy:
   independent:
     create:
+      dummy:
     verify:
     destroy:
+      dummy:
 "#;
 
     #[test]
@@ -899,7 +872,7 @@ scenarios:
         let root = std::env::temp_dir().join(format!("cvd-verify-config-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("verify.yml"), "---\n").unwrap();
-        let base = "version: 1\nconverger: dummy\nverifier: ansible\nscenarios:\n  root:\n    verify:\n      check:\n";
+        let base = "version: 1\nscenarios:\n  root:\n    verify:\n      check:\n";
         let valid = format!("{base}        ansible: {{playbook: verify.yml}}\n");
         let config = Config::from_yaml_at(&valid, &root.join("cvd.yml")).unwrap();
         let test = config
@@ -933,19 +906,18 @@ scenarios:
         }
         assert!(
             Config::from_yaml_at(
-                &format!("{valid}        verifier: ansible\n")
-                    .replace("verifier: ansible\nscenarios", "verifier: dummy\nscenarios"),
+                &format!("{valid}        verifier: ansible\n"),
                 &root.join("cvd.yml")
             )
-            .is_ok()
+            .is_err()
         );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn parses_phase_payloads_tests_and_ordered_nested_scenarios() {
         let config = Config::from_yaml(NESTED).unwrap();
         assert_eq!(config.version(), CONFIG_VERSION);
-        assert_eq!(config.converger, "dummy");
         assert_eq!(
             config.scenario_paths(),
             [
@@ -959,7 +931,7 @@ scenarios:
         assert!(default.has_phase(ConfiguredPhase::Prepare));
         assert_eq!(
             default.phase_value(ConfiguredPhase::Converge),
-            Some(&serde_yaml::Value::String("site.yml".to_owned()))
+            Some(&serde_yaml::from_str::<serde_yaml::Value>("dummy: {}").unwrap())
         );
         assert!(
             !config
@@ -977,12 +949,12 @@ scenarios:
         fs::create_dir_all(&nested_directory).unwrap();
         fs::write(
             nested_directory.join("child.yml"),
-            "create:\nverify:\ndestroy:\n",
+            "create:\n  dummy:\nverify:\ndestroy:\n  dummy:\n",
         )
         .unwrap();
         let root = directory.join("cvd.yml");
         let yaml = NESTED.replacen(
-            "      - name: restart\n        create:\n          dummy:\n        converge:\n        verify:\n        destroy:\n        nested:\n          - name: after\n            create:\n            verify:\n            destroy:\n",
+            "      - name: restart\n        create:\n          dummy:\n        converge:\n          dummy:\n        verify:\n        destroy:\n          dummy:\n        nested:\n          - name: after\n            create:\n              dummy:\n            verify:\n            destroy:\n              dummy:\n",
             "      - name: restart\n        include: nested/child.yml\n",
             1,
         );
@@ -996,7 +968,7 @@ scenarios:
         let first_source = config.source_material().to_owned();
         fs::write(
             nested_directory.join("child.yml"),
-            "create:\nprepare:\nverify:\ndestroy:\n",
+            "create:\n  dummy:\nprepare:\n  dummy:\nverify:\ndestroy:\n  dummy:\n",
         )
         .unwrap();
         let changed = Config::from_yaml_at(&yaml, &root).unwrap();
@@ -1021,7 +993,6 @@ scenarios:
         let path = fs::canonicalize("examples/ansible-docker/cvd.yml").unwrap();
         let yaml = fs::read_to_string(&path).unwrap();
         let config = Config::from_yaml_at(&yaml, &path).unwrap();
-        assert_eq!(config.converger, "ansible");
         assert_eq!(
             config.inventory,
             vec![fs::canonicalize("examples/ansible-docker/inventory.yml").unwrap()]
@@ -1046,28 +1017,24 @@ scenarios:
                 ..
             })
         ));
-        for phase in ["prepare", "cleanup"] {
-            let existing = format!("    {phase}:\n      ansible:\n        playbook: {phase}.yml\n");
-            let yaml = yaml
-                .replace(&existing, "")
-                .replace("    converge:", &format!("    {phase}:"));
+        for phase in ["create", "prepare", "converge", "cleanup", "destroy"] {
+            let yaml = format!(
+                "version: 1\nscenarios:\n  root:\n    {phase}:\n      ansible:\n        playbook: converge.yml\n"
+            );
             Config::from_yaml_at(&yaml, &path).unwrap();
         }
         for phase in ["verify", "idempotence"] {
-            let yaml = yaml
-                .replace("    verify:\n", "")
-                .replace("    converge:", &format!("    {phase}:"));
+            let yaml = format!(
+                "version: 1\nscenarios:\n  root:\n    {phase}:\n      ansible:\n        playbook: converge.yml\n"
+            );
             assert!(matches!(
                 Config::from_yaml_at(&yaml, &path),
                 Err(ConfigError::InvalidPhase { .. })
             ));
         }
-        let list = yaml.replace(
-            "    converge:\n      ansible:\n        playbook: converge.yml",
-            "    converge:\n      - ansible:\n          playbook: converge.yml",
-        );
+        let list = "version: 1\nscenarios:\n  root:\n    converge:\n      - ansible:\n          playbook: converge.yml\n";
         assert!(matches!(
-            Config::from_yaml_at(&list, &path),
+            Config::from_yaml_at(list, &path),
             Err(ConfigError::InvalidPhase { .. })
         ));
     }
@@ -1079,9 +1046,9 @@ scenarios:
         let child = directory.join("nested");
         fs::create_dir_all(&child).unwrap();
         fs::write(child.join("test_host.py"), "def test_host(): pass\n").unwrap();
-        let fragment = "verify:\n  host:\n    verifier: pytest\n    pytest:\n      path: test_host.py\n      args: ['-k', 'a name']\n";
+        let fragment = "verify:\n  host:\n    pytest:\n      path: test_host.py\n      args: ['-k', 'a name']\n";
         fs::write(child.join("scenario.yml"), fragment).unwrap();
-        let yaml = "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  root:\n    nested:\n      - name: child\n        include: nested/scenario.yml\n";
+        let yaml = "version: 1\nscenarios:\n  root:\n    nested:\n      - name: child\n        include: nested/scenario.yml\n";
         let root = directory.join("cvd.yml");
         let config = Config::from_yaml_at(yaml, &root).unwrap();
         let (_, test) = config
@@ -1100,26 +1067,19 @@ scenarios:
         for bad in [
             fragment.replace("test_host.py", "absent.py"),
             fragment.replace("test_host.py", "''"),
-            fragment.replace("    verifier: pytest", "    verifier: dummy"),
+            fragment.replace("    pytest:", "    verifier: dummy\n    pytest:"),
             fragment.replace(
                 "    pytest:\n      path: test_host.py\n      args: ['-k', 'a name']\n",
                 "",
             ),
-            fragment.replace(
-                "    verifier: pytest",
-                "    verifier: pytest\n    status: fail",
-            ),
+            fragment.replace("    pytest:", "    status: fail\n    pytest:"),
             fragment.replace("args: ['-k', 'a name']", "args: '-k name'"),
         ] {
             fs::write(child.join("scenario.yml"), bad).unwrap();
             assert!(Config::from_yaml_at(yaml, &root).is_err());
         }
-        fs::write(
-            child.join("scenario.yml"),
-            fragment.replace("    verifier: pytest\n", ""),
-        )
-        .unwrap();
-        Config::from_yaml_at(&yaml.replace("verifier: dummy", "verifier: pytest"), &root).unwrap();
+        fs::write(child.join("scenario.yml"), fragment).unwrap();
+        Config::from_yaml_at(yaml, &root).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1131,9 +1091,6 @@ scenarios:
         let root = directory.join("cvd.yml");
         let root_yaml = r#"
 version: 1
-provisioner: dummy
-converger: dummy
-verifier: dummy
 scenarios:
   default:
     nested:
@@ -1173,7 +1130,7 @@ scenarios:
 
         let duplicate = NESTED.replacen(
             "      - name: restart\n",
-            "      - name: restart\n        create:\n      - name: restart\n",
+            "      - name: restart\n        create:\n          dummy:\n      - name: restart\n",
             1,
         );
         assert!(matches!(
@@ -1194,14 +1151,17 @@ scenarios:
 
     #[test]
     fn rejects_unknown_implementations_and_duplicate_test_names() {
-        let implementation = NESTED.replacen("converger: dummy", "converger: unknown", 1);
+        let implementation = NESTED.replacen("dummy:", "unknown:", 1);
         assert!(matches!(
             Config::from_yaml(&implementation),
-            Err(ConfigError::InvalidDefault { .. })
+            Err(ConfigError::InvalidPhase { .. })
         ));
 
-        let duplicate_test =
-            NESTED.replacen("      smoke: {}", "      smoke: {}\n      smoke: {}", 1);
+        let duplicate_test = NESTED.replacen(
+            "      smoke: {dummy: {}}",
+            "      smoke: {dummy: {}}\n      smoke: {dummy: {}}",
+            1,
+        );
         assert!(matches!(
             Config::from_yaml(&duplicate_test),
             Err(ConfigError::Parse(_))
@@ -1222,16 +1182,20 @@ scenarios:
     fn validates_dummy_phase_and_test_statuses() {
         let valid = NESTED
             .replacen(
-                "    create:",
+                "    create:\n      dummy:",
                 "    create:\n      dummy:\n        status: error",
                 1,
             )
-            .replacen("      smoke: {}", "      smoke:\n        status: fail", 1);
+            .replacen(
+                "      smoke: {dummy: {}}",
+                "      smoke:\n        dummy:\n          status: fail",
+                1,
+            );
         Config::from_yaml(&valid).unwrap();
 
         for options in ["status: fail", "status: unknown", "unknown: true"] {
             let invalid = NESTED.replacen(
-                "    create:",
+                "    create:\n      dummy:",
                 &format!("    create:\n      dummy:\n        {options}"),
                 1,
             );
@@ -1242,8 +1206,8 @@ scenarios:
         }
 
         let invalid_test = NESTED.replacen(
-            "      smoke: {}",
-            "      smoke:\n        status: unknown",
+            "      smoke: {dummy: {}}",
+            "      smoke:\n        dummy:\n          status: unknown",
             1,
         );
         assert!(matches!(
@@ -1254,14 +1218,14 @@ scenarios:
 
     #[test]
     fn verify_contains_tests_and_rejects_legacy_or_opaque_payloads() {
-        let base = "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  root:\n";
+        let base = "version: 1\nscenarios:\n  root:\n";
         for value in ["    verify:\n", "    verify: {}\n"] {
             let config = Config::from_yaml(&format!("{base}{value}")).unwrap();
             let scenario = config.scenario("root").unwrap();
             assert!(scenario.has_phase(ConfiguredPhase::Verify));
             assert_eq!(scenario.tests.iter().count(), 0);
         }
-        let config = Config::from_yaml(&format!("{base}    create:\n")).unwrap();
+        let config = Config::from_yaml(&format!("{base}    create: {{dummy: {{}}}}\n")).unwrap();
         assert!(
             !config
                 .scenario("root")
@@ -1269,7 +1233,7 @@ scenarios:
                 .has_phase(ConfiguredPhase::Verify)
         );
         let config = Config::from_yaml(&format!(
-            "{base}    verify:\n      z: {{}}\n      a: {{status: fail}}\n"
+            "{base}    verify:\n      z: {{dummy: {{}}}}\n      a: {{dummy: {{status: fail}}}}\n"
         ))
         .unwrap();
         assert_eq!(
@@ -1294,6 +1258,170 @@ scenarios:
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_removed_adapter_selectors() {
+        for selector in [
+            "provisioner",
+            "converger",
+            "verifier",
+            "provisioner_type",
+            "converger_type",
+            "verifier_type",
+        ] {
+            let root = format!("version: 1\n{selector}: dummy\nscenarios: {{}}\n");
+            assert!(
+                matches!(Config::from_yaml(&root), Err(ConfigError::Parse(_))),
+                "{root}"
+            );
+            let scenario = format!("version: 1\nscenarios:\n  root:\n    {selector}: dummy\n");
+            assert!(
+                matches!(Config::from_yaml(&scenario), Err(ConfigError::Parse(_))),
+                "{scenario}"
+            );
+            let test = format!(
+                "version: 1\nscenarios:\n  root:\n    verify:\n      smoke:\n        {selector}: dummy\n        dummy: {{}}\n"
+            );
+            assert!(Config::from_yaml(&test).is_err(), "{test}");
+        }
+    }
+
+    #[test]
+    fn every_enabled_phase_requires_an_unambiguous_adapter() {
+        for phase in [
+            "create",
+            "prepare",
+            "converge",
+            "idempotence",
+            "cleanup",
+            "destroy",
+        ] {
+            for payload in [
+                "",
+                "null",
+                "true",
+                "42",
+                "site.yml",
+                "{}",
+                "[]",
+                "[site.yml]",
+                "[null]",
+                "[{dummy: {}}, site.yml]",
+                "{unknown: {}}",
+                "{dummy: {}, ansible: {playbook: unused.yml}}",
+                "{dummy: {}, dummy: {}}",
+                "{pytest: {path: unused.py}}",
+            ] {
+                let yaml = format!("version: 1\nscenarios:\n  root:\n    {phase}: {payload}\n");
+                assert!(Config::from_yaml(&yaml).is_err(), "{yaml}");
+            }
+            for payload in [
+                "{dummy: null}",
+                "{dummy: {}}",
+                "[{dummy: {}}, {dummy: {status: ok}}]",
+            ] {
+                let yaml = format!("version: 1\nscenarios:\n  root:\n    {phase}: {payload}\n");
+                Config::from_yaml(&yaml).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn named_tests_require_exactly_one_adapter_with_its_own_options() {
+        for payload in [
+            "",
+            "null",
+            "{}",
+            "true",
+            "test.py",
+            "[]",
+            "{status: ok}",
+            "{verifier: dummy}",
+            "{verifier_type: dummy}",
+            "{unknown: {}}",
+            "{dummy: {}, status: ok}",
+            "{dummy: {unknown: true}}",
+            "{dummy: {status: unknown}}",
+            "{dummy: {}, dummy: {}}",
+            "{dummy: {}, ansible: {playbook: unused.yml}}",
+            "{dummy: {}, pytest: {path: unused.py}}",
+            "{ansible: {playbook: unused.yml}, pytest: {path: unused.py}}",
+            "{ansible: null}",
+            "{pytest: null}",
+            "{ansible: {playbook: unused.yml, status: ok}}",
+            "{pytest: {path: unused.py, status: ok}}",
+        ] {
+            let yaml =
+                format!("version: 1\nscenarios:\n  root:\n    verify:\n      smoke: {payload}\n");
+            assert!(Config::from_yaml(&yaml).is_err(), "{yaml}");
+        }
+        for payload in ["{dummy: null}", "{dummy: {}}", "{dummy: {status: fail}}"] {
+            let yaml =
+                format!("version: 1\nscenarios:\n  root:\n    verify:\n      smoke: {payload}\n");
+            Config::from_yaml(&yaml).unwrap();
+        }
+    }
+
+    #[test]
+    fn mixed_adapters_are_selected_locally_in_included_scenarios() {
+        let directory =
+            std::env::temp_dir().join(format!("cvd-mixed-adapters-{}", std::process::id()));
+        let child = directory.join("nested");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("playbook.yml"), "---\n").unwrap();
+        fs::write(child.join("test_web.py"), "def test_web(): pass\n").unwrap();
+        fs::write(
+            child.join("scenario.yml"),
+            r#"
+create: {ansible: {playbook: playbook.yml}}
+prepare: {dummy: {}}
+converge: {ansible: {playbook: playbook.yml}}
+cleanup: {dummy: {}}
+destroy: {ansible: {playbook: playbook.yml}}
+verify:
+  playbook: {ansible: {playbook: playbook.yml}}
+  python: {pytest: {path: test_web.py}}
+  assertion: {dummy: {status: fail}}
+"#,
+        )
+        .unwrap();
+        let yaml = "version: 1\nscenarios:\n  root:\n    create: {dummy: {}}\n    destroy: {dummy: {}}\n    nested:\n      - name: child\n        include: nested/scenario.yml\n";
+        let config = Config::from_yaml_at(yaml, &directory.join("cvd.yml")).unwrap();
+        let scenario = config.scenario("root/child").unwrap();
+        for phase in [
+            ConfiguredPhase::Create,
+            ConfiguredPhase::Converge,
+            ConfiguredPhase::Destroy,
+        ] {
+            assert_eq!(
+                scenario.phase(phase).unwrap().ansible().unwrap().playbook,
+                child.join("playbook.yml")
+            );
+        }
+        for phase in [ConfiguredPhase::Prepare, ConfiguredPhase::Cleanup] {
+            let definition = scenario.phase(phase).unwrap();
+            assert!(definition.ansible().is_none());
+            assert_eq!(definition.dummy_status(), super::DummyStatus::Ok);
+        }
+        let tests: Vec<_> = scenario.tests.iter().collect();
+        assert_eq!(
+            tests
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["playbook", "python", "assertion"]
+        );
+        assert_eq!(
+            tests[0].1.ansible.as_ref().unwrap().playbook,
+            child.join("playbook.yml")
+        );
+        assert_eq!(
+            tests[1].1.pytest.as_ref().unwrap().path,
+            child.join("test_web.py")
+        );
+        assert_eq!(tests[2].1.status, super::DummyStatus::Fail);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

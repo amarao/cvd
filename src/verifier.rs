@@ -51,7 +51,6 @@ pub struct VerifierError(pub String);
 
 /// Pytest also runs testinfra when its plugin is installed in the selected environment.
 pub struct RuntimeVerifier {
-    pub default_verifier: String,
     pub ansible: crate::provisioner::AnsibleProvisioner,
     pub working_directory: PathBuf,
     pub inventory: crate::inventory::AnsibleInventory,
@@ -66,12 +65,7 @@ impl Verifier for RuntimeVerifier {
         overlay: Option<&Path>,
         resources: &[crate::state::Resource],
     ) -> Result<VerifierStatus, VerifierError> {
-        let selected = test.verifier.as_deref().unwrap_or(&self.default_verifier);
-        if selected == "ansible" {
-            let definition = test
-                .ansible
-                .as_ref()
-                .ok_or_else(|| VerifierError("ansible verifier requires a playbook".to_owned()))?;
+        if let Some(definition) = &test.ansible {
             self.ansible
                 .converge(scenario_path, "verify", definition, overlay, resources)
                 .map_err(|error| {
@@ -81,7 +75,7 @@ impl Verifier for RuntimeVerifier {
                 })?;
             return Ok(VerifierStatus::Pass);
         }
-        if selected == "dummy" {
+        if test.pytest.is_none() {
             return DummyVerifier.verify(scenario_path, test_name, test, overlay, resources);
         }
         let pytest = test

@@ -3,7 +3,7 @@
   hosts: webservers
   gather_facts: false
   tasks:
-    - name: Hello world
+    - name: Configure the greeting served at the HTTP root
       # no python in the image
-      ansible.builtin.raw: "printf '%s\\n' {{ greeting | quote }} > /tmp/cvd-greeting"
+      ansible.builtin.raw: "printf '%s\\n' {{ greeting | quote }} > /srv/www/index.html"
       changed_when: true

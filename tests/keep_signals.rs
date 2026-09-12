@@ -36,9 +36,6 @@ fn run_case(
         directory.join("cvd.yml"),
         r#"version: 1
 inventory: [inventory.yml]
-provisioner: ansible
-converger: ansible
-verifier: pytest
 scenarios:
   root:
     create: &action

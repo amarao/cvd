@@ -866,38 +866,49 @@ mod tests {
 
     const CONFIG: &str = r#"
 version: 1
-provisioner: dummy
-converger: dummy
-verifier: dummy
 scenarios:
   default:
     create:
+      dummy:
     prepare:
+      dummy:
     converge:
+      dummy:
     cleanup:
+      dummy:
     destroy:
+      dummy:
     verify:
-      smoke: {}
+      smoke: {dummy: {}}
     nested:
       - name: restart
         create:
+          dummy:
         converge:
+          dummy:
         destroy:
+          dummy:
         verify:
-          after-restart: {}
+          after-restart: {dummy: {}}
         nested:
           - name: deep
             create:
+              dummy:
             verify:
             destroy:
+              dummy:
       - name: ignored
         create:
+          dummy:
         verify:
         destroy:
+          dummy:
   independent:
     create:
+      dummy:
     verify:
     destroy:
+      dummy:
 "#;
 
     fn test_store(label: &str) -> (StateStore, PathBuf) {
@@ -1043,9 +1054,6 @@ scenarios:
         let config = Config::from_yaml(
             r#"
 version: 1
-provisioner: dummy
-converger: dummy
-verifier: dummy
 scenarios:
   empty: {}
 "#,

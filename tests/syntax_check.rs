@@ -115,7 +115,7 @@ fn rejects_a_configuration_with_a_missing_referenced_file() {
     let configuration = directory.join("cvd.yml");
     write_file(
         &configuration,
-        b"version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  default:\n    create:\n      ansible:\n        playbook: missing.yml\n",
+        b"version: 1\nscenarios:\n  default:\n    create:\n      ansible:\n        playbook: missing.yml\n",
     );
 
     assert_invalid(
@@ -131,10 +131,7 @@ fn accepts_a_minimal_configuration() {
     let directory = test_directory("minimal");
     fs::create_dir_all(&directory).unwrap();
     let configuration = directory.join("cvd.yml");
-    write_file(
-        &configuration,
-        b"version: 1\nconverger: dummy\nverifier: dummy\nscenarios: {}\n",
-    );
+    write_file(&configuration, b"version: 1\nscenarios: {}\n");
 
     assert_valid(syntax_check(&["--file", configuration.to_str().unwrap()]));
 
@@ -148,7 +145,7 @@ fn accepts_a_complicated_scenario() {
     let configuration = directory.join("cvd.yml");
     write_file(
         &configuration,
-        b"version: 1\nprovisioner: dummy\nconverger: dummy\nverifier: dummy\nscenarios:\n  complicated:\n    create:\n      dummy: {}\n    prepare: prepare input\n    converge:\n      - first convergence input\n      - second convergence input\n    idempotence:\n    verify:\n      smoke: {}\n      expected-failure:\n        status: fail\n    nested:\n      - name: restart\n        create:\n        converge:\n          dummy:\n            status: ok\n        verify:\n          after-restart: {}\n        cleanup:\n        destroy:\n      - name: deeper\n        nested:\n          - name: final\n            verify:\n              final-check: {}\n    cleanup:\n      dummy: {}\n    destroy:\n",
+        b"version: 1\nscenarios:\n  complicated:\n    create:\n      dummy: {}\n    prepare: {dummy: {}}\n    converge:\n      - dummy: {}\n      - dummy: {status: ok}\n    idempotence:\n      dummy:\n    verify:\n      smoke: {dummy: {}}\n      expected-failure:\n        dummy:\n          status: fail\n    nested:\n      - name: restart\n        create:\n          dummy:\n        converge:\n          dummy:\n            status: ok\n        verify:\n          after-restart: {dummy: {}}\n        cleanup:\n          dummy:\n        destroy:\n          dummy:\n      - name: deeper\n        nested:\n          - name: final\n            verify:\n              final-check: {dummy: {}}\n    cleanup:\n      dummy: {}\n    destroy:\n      dummy:\n",
     );
 
     assert_valid(syntax_check(&["--file", configuration.to_str().unwrap()]));
@@ -161,10 +158,7 @@ fn directory_option_discovers_cvd_yaml_and_cvd_yml() {
     for filename in ["cvd.yaml", "cvd.yml"] {
         let directory = test_directory(filename);
         fs::create_dir_all(&directory).unwrap();
-        write_file(
-            &directory.join(filename),
-            b"version: 1\nconverger: dummy\nverifier: dummy\nscenarios: {}\n",
-        );
+        write_file(&directory.join(filename), b"version: 1\nscenarios: {}\n");
 
         assert_valid(syntax_check(&["-F", directory.to_str().unwrap()]));
 

@@ -82,16 +82,14 @@ impl Provisioner for DummyProvisioner {
 /// Runs Ansible create/destroy playbooks using a versioned JSON-file contract.
 #[derive(Debug)]
 pub struct AnsibleProvisioner {
-    default_is_ansible: bool,
     working_directory: PathBuf,
     inventory: crate::inventory::AnsibleInventory,
 }
 
 impl AnsibleProvisioner {
-    pub fn new(default_is_ansible: bool, working_directory: impl Into<PathBuf>) -> Self {
+    pub fn new(working_directory: impl Into<PathBuf>) -> Self {
         let working_directory = working_directory.into();
         Self {
-            default_is_ansible,
             inventory: crate::inventory::AnsibleInventory::new(&working_directory, Vec::new()),
             working_directory,
         }
@@ -119,19 +117,6 @@ impl AnsibleProvisioner {
             .map_err(|error| ProvisionerError(error.to_string()))?;
         self.run(scenario_path, action, resources, definition, false, overlay)
             .map(|_| ())
-    }
-
-    fn selected<'a>(
-        &self,
-        definition: &'a PhaseDefinition,
-    ) -> Result<Option<&'a crate::config::AnsiblePhaseDefinition>, ProvisionerError> {
-        match definition.ansible() {
-            some @ Some(_) => Ok(some),
-            None if self.default_is_ansible => Err(ProvisionerError(
-                "the Ansible provisioner requires an explicit `ansible` phase mapping".to_owned(),
-            )),
-            None => Ok(None),
-        }
     }
 
     fn run(
@@ -233,7 +218,7 @@ impl Provisioner for AnsibleProvisioner {
         scenario_path: &str,
         definition: &PhaseDefinition,
     ) -> Result<ResourceManifest, ProvisionerError> {
-        let Some(ansible) = self.selected(definition)? else {
+        let Some(ansible) = definition.ansible() else {
             return DummyProvisioner.create(scenario_path, definition);
         };
         let result = self
@@ -283,7 +268,7 @@ impl Provisioner for AnsibleProvisioner {
         resources: &ResourceManifest,
         definition: &PhaseDefinition,
     ) -> Result<(), ProvisionerError> {
-        let Some(ansible) = self.selected(definition)? else {
+        let Some(ansible) = definition.ansible() else {
             return DummyProvisioner.destroy(scenario_path, resources, definition);
         };
         self.run(

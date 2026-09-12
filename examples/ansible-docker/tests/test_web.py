@@ -1,4 +1,6 @@
-"""Testinfra reads CVD's ANSIBLE_INVENTORY through its Ansible backend."""
+"""Read the runtime inventory with Testinfra and verify HTTP from the controller."""
+
+from urllib.request import ProxyHandler, build_opener
 
 
 testinfra_hosts = ["ansible://webservers"]
@@ -9,8 +11,9 @@ def test_cvd_context(host):
     assert cvd["invocation_id"]
 
 
-def test_greeting(host):
+def test_greeting_http(host):
     variables = host.ansible.get_variables()
-    greeting = host.file("/tmp/cvd-greeting")
-    assert greeting.is_file
-    assert greeting.content_string == variables["greeting"] + "\n"
+    http = build_opener(ProxyHandler({}))
+    with http.open(variables["http_url"], timeout=5) as response:
+        assert response.status == 200
+        assert response.read().decode("utf-8") == variables["greeting"] + "\n"

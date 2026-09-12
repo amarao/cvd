@@ -2,7 +2,7 @@
 
 CVD (short for Create-Verify-Destroy) is a tool for implementing end-to-end integration
 tests for IaaC (infrastructure as code). It provides the ability to run tests on
-ephemeral resources (hosts, virtual machines, clusters, even real servers).
+ephemeral resources (virtual machines, clusters, baremetal servers).
 
 It's done via a well-known pattern of 'deploy on ephemeral staging'. CVD helps to glue
 together 'create/destroy', converge and verify parts of this process.

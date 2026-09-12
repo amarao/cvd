@@ -1,32 +1,28 @@
 version: 1
 inventory: [inventory.yml]
-provisioner: ansible
-converger: ansible
-verifier: pytest
 
 scenarios:
-  scenario_id_1:
+  web_greeting:  # scenario name
     create:
-      ansible:
+      ansible: # provisioner type
         playbook: create.yml
     prepare:
-      ansible:
+      ansible: # converger type
         playbook: prepare.yml
     converge:
-      ansible:
+      ansible: # converger type
         playbook: converge.yml
     verify:
-      greeting_ansible:
-        verifier: ansible
+      greeting_ansible: # name of the verifier run
         ansible:
           playbook: verify.yml
       greeting:
         pytest:
           path: tests/test_web.py
           args: ["-v"]
-    cleanup:
-      ansible:
-        playbook: cleanup.yml
+    # cleanup:
+    #   ansible:
+    #     playbook: cleanup.yml
     destroy:
       ansible:
         playbook: destroy.yml

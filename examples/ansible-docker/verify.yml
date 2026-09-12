@@ -1,15 +1,23 @@
 ---
-- name: Verify the greeting through the runtime inventory
+- name: Verify the HTTP greeting through the runtime inventory
   hosts: webservers
   gather_facts: false
   tasks:
-    - name: Read the greeting without requiring Python in the container
-      ansible.builtin.raw: cat /tmp/cvd-greeting
+    - name: Request the greeting over HTTP from the controller
+      ansible.builtin.uri:
+        url: "{{ http_url }}"
+        return_content: true
+        timeout: 5
+        use_proxy: false
+      delegate_to: localhost
       register: greeting_result
       changed_when: false
+      until: greeting_result.status == 200
+      retries: 5
+      delay: 1
 
     - name: Check the configured greeting
       ansible.builtin.assert:
         that:
-          - greeting_result.stdout | trim == greeting
-        fail_msg: The container greeting does not match its inventory variable
+          - greeting_result.content | trim == greeting
+        fail_msg: The HTTP response does not match the greeting inventory variable

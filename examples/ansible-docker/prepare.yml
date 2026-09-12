@@ -3,14 +3,6 @@
   hosts: webservers
   gather_facts: false
   tasks:
-    - name: Check container access and a writable temporary directory
-      ansible.builtin.raw: test -w /tmp
+    - name: Check container access and a writable HTTP document root
+      ansible.builtin.raw: mkdir -p /srv/www
       changed_when: false
-
-    - name: Remove any previous greeting
-      ansible.builtin.raw: |
-        if [ -e /tmp/cvd-greeting ]; then
-          rm /tmp/cvd-greeting && printf 'removed\n'
-        fi
-      register: prepare_greeting
-      changed_when: "'removed' in prepare_greeting.stdout"

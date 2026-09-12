@@ -144,16 +144,13 @@ fn run(args: RunArgs) -> Result<(), AppError> {
         .parent()
         .expect("canonical configuration path has a parent");
     let provisioner =
-        AnsibleProvisioner::new(configuration.provisioner == "ansible", working_directory)
-            .with_inventory(configuration.inventory.clone());
+        AnsibleProvisioner::new(working_directory).with_inventory(configuration.inventory.clone());
     let converger = AnsibleConverger {
-        runtime: AnsibleProvisioner::new(false, working_directory)
+        runtime: AnsibleProvisioner::new(working_directory)
             .with_inventory(configuration.inventory.clone()),
-        default_is_ansible: configuration.converger == "ansible",
     };
     let verifier = RuntimeVerifier {
-        default_verifier: configuration.verifier.clone(),
-        ansible: AnsibleProvisioner::new(false, working_directory)
+        ansible: AnsibleProvisioner::new(working_directory)
             .with_inventory(configuration.inventory.clone()),
         working_directory: working_directory.to_owned(),
         inventory: inventory::AnsibleInventory::new(

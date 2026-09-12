@@ -1,8 +1,5 @@
 version: 1
 inventory: [inventory.yml]
-provisioner: ansible
-converger: ansible
-verifier: pytest
 scenarios:
   native:
     create:

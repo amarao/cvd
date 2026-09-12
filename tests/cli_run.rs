@@ -52,7 +52,7 @@ fn syntax_check_validates_configuration_and_referenced_files_without_running() {
     fs::write(&playbook, "---\n").unwrap();
     fs::write(
         &configuration,
-        "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  default:\n    create:\n      ansible:\n        playbook: create.yml\n",
+        "version: 1\nscenarios:\n  default:\n    create:\n      ansible:\n        playbook: create.yml\n",
     )
     .unwrap();
 
@@ -490,9 +490,6 @@ fn dummy_status_options_control_errors_and_verifier_failures() {
     fs::write(
         &configuration,
         r#"version: 1
-provisioner: dummy
-converger: dummy
-verifier: dummy
 scenarios:
   create-error:
     create: {dummy: {status: error}}
@@ -506,15 +503,26 @@ scenarios:
     create: {dummy: {status: ok}}
     destroy: {dummy: {status: ok}}
     verify:
-      assertion: {verifier: dummy, status: fail}
+      assertion: {dummy: {status: fail}}
   verifier-error:
     create: {dummy: {status: ok}}
     destroy: {dummy: {status: ok}}
     verify:
-      broken: {verifier: dummy, status: error}
+      broken: {dummy: {status: error}}
   destroy-error:
     create: {dummy: {status: ok}}
     destroy: {dummy: {status: error}}
+  list-create-error:
+    create: [{dummy: {}}, {dummy: {status: error}}]
+    destroy: {dummy: {}}
+  list-converge-error:
+    create: {dummy: {}}
+    converge: [{dummy: {}}, {dummy: {status: error}}]
+    cleanup: {dummy: {}}
+    destroy: {dummy: {}}
+  list-destroy-error:
+    create: {dummy: {}}
+    destroy: [{dummy: {}}, {dummy: {status: error}}]
 "#,
     )
     .unwrap();
@@ -524,6 +532,9 @@ scenarios:
         ("verifier-fail", "/test_results/0/status", "fail"),
         ("verifier-error", "/test_results/0/status", "error"),
         ("destroy-error", "/phases/destroy/status", "error"),
+        ("list-create-error", "/phases/create/status", "error"),
+        ("list-converge-error", "/phases/converge/status", "error"),
+        ("list-destroy-error", "/phases/destroy/status", "error"),
     ] {
         let state_directory = directory.join(format!("state-{selector}"));
         let output = run(&[
@@ -567,9 +578,6 @@ fn ansible_provisioner_imports_create_manifest_and_supplies_it_to_destroy() {
     fs::write(
         &configuration,
         r#"version: 1
-provisioner: ansible
-converger: dummy
-verifier: dummy
 scenarios:
   host:
     create:
@@ -684,7 +692,7 @@ fn ansible_inventory_overlay_preserves_sources_and_cleanup_after_errors() {
         )
         .unwrap();
         let configuration = directory.join("cvd.yml");
-        fs::write(&configuration, "version: 1\ninventory: [inventory.yml]\nprovisioner: ansible\nconverger: ansible\nverifier: dummy\nscenarios:\n  host:\n    create:\n      ansible:\n        playbook: create.yml\n    converge:\n      ansible:\n        playbook: converge.yml\n    cleanup:\n      ansible:\n        playbook: cleanup.yml\n    destroy:\n      ansible:\n        playbook: destroy.yml\n").unwrap();
+        fs::write(&configuration, "version: 1\ninventory: [inventory.yml]\nscenarios:\n  host:\n    create:\n      ansible:\n        playbook: create.yml\n    converge:\n      ansible:\n        playbook: converge.yml\n    cleanup:\n      ansible:\n        playbook: cleanup.yml\n    destroy:\n      ansible:\n        playbook: destroy.yml\n").unwrap();
         let mut original_sources = vec![directory.join("inventory.yml")];
         let inherited = if mode == "inherited" {
             let sources = [
@@ -873,7 +881,7 @@ fn ansible_rejects_configured_inventory_paths_with_commas_before_launch() {
     let configuration = directory.join("cvd.yml");
     fs::write(
         &configuration,
-        "version: 1\ninventory: ['inventory,one.yml']\nprovisioner: ansible\nconverger: dummy\nverifier: dummy\nscenarios:\n  host:\n    create:\n      ansible:\n        playbook: create.yml\n",
+        "version: 1\ninventory: ['inventory,one.yml']\nscenarios:\n  host:\n    create:\n      ansible:\n        playbook: create.yml\n",
     )
     .unwrap();
     let script = bin.join("ansible-playbook");
@@ -1039,12 +1047,10 @@ fn pytest_receives_inventory_and_all_unsuccessful_exits_are_errors() {
         let yaml = format!(
             r#"version: 1
 inventory: [inventory.yml]
-provisioner: ansible
-converger: dummy
-verifier: pytest
 scenarios:
   root:
 {create}    cleanup:
+      dummy:
     destroy:
       ansible:
         playbook: destroy.yml
@@ -1054,7 +1060,7 @@ scenarios:
           path: test_example.py
           args: ["-k", "a name with spaces", "$(not-a-shell)"]
       second:
-        verifier: dummy
+        dummy:
     nested:
       - name: child
         verify:
@@ -1065,7 +1071,7 @@ scenarios:
         );
         let yaml = if mode == "multiple" {
             yaml.replace(
-                "      second:\n        verifier: dummy",
+                "      second:\n        dummy:",
                 "      second:\n        pytest:\n          path: test_example.py",
             )
         } else {
@@ -1319,7 +1325,7 @@ fn directory_option_selects_yaml_and_state_without_requiring_config_for_inspecti
     let directory = test_directory("directory-option");
     fs::create_dir_all(&directory).unwrap();
     let config = directory.join("cvd.yaml");
-    fs::write(&config, "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  selected:\n    create:\n    destroy:\n").unwrap();
+    fs::write(&config, "version: 1\nscenarios:\n  selected:\n    create:\n      dummy:\n    destroy:\n      dummy:\n").unwrap();
     let yml_config = directory.join("cvd.yml");
     fs::write(&yml_config, "invalid: must not be selected\n").unwrap();
     let output = run(&["run", "-F", directory.to_str().unwrap()]);
@@ -1342,7 +1348,7 @@ fn directory_option_selects_yaml_and_state_without_requiring_config_for_inspecti
     fs::remove_file(config).unwrap();
     fs::write(
         &yml_config,
-        "version: 1\nconverger: dummy\nverifier: dummy\nscenarios:\n  selected:\n    create:\n    destroy:\n",
+        "version: 1\nscenarios:\n  selected:\n    create:\n      dummy:\n    destroy:\n      dummy:\n",
     )
     .unwrap();
     let output = run(&["run", "-F", directory.to_str().unwrap()]);
@@ -1375,9 +1381,6 @@ fn ansible_verifier_receives_inventory_context_and_cleans_up_after_errors() {
             &config,
             r#"version: 1
 inventory: [inventory.yml]
-provisioner: ansible
-converger: dummy
-verifier: ansible
 scenarios:
   root:
     create:
@@ -1388,9 +1391,11 @@ scenarios:
           check:
             ansible: {playbook: verify.yml, vars: {expected: yes}}
           later:
-            verifier: dummy
+            dummy:
         cleanup:
+          dummy:
     cleanup:
+      dummy:
     destroy:
       ansible: {playbook: create.yml}
 "#,

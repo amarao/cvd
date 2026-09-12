@@ -72,10 +72,11 @@ scenarios to arbitrary depth and can define any of these optional phases:
 
 Each scenario explicitly declares the phases it enables as keys. Omitted phase
 keys are recorded as skipped. `verify` contains named test definitions as
-described below. Other phase values may be null, a scalar, one adapter mapping,
-or an ordered list. Those values are opaque adapter input; null and scalar
-values use the applicable default. Each adapter mapping contains exactly one
-adapter name and its input.
+described below. Other phase values must be one adapter mapping or a nonempty
+ordered list of adapter mappings. Each mapping contains exactly one adapter
+name and its input. Bare null/scalar phases, empty mappings, and scalar lists
+are rejected because they do not select an adapter. Adapter input can be null
+when that adapter allows it, for example `create: {dummy: null}`.
 
 A child scenario inherits its parent's state and resources. It can add
 resources and state values of its own. Its cleanup and destruction affect
@@ -136,31 +137,49 @@ tests directly under its `verify` mapping. Declaring those tests enables the
 verification phase; there is no separate `tests` section. Omitted `verify`
 is skipped. `verify: {}` or `verify:` enables an empty verification phase,
 which passes without invoking a verifier. Verification accepts named test
-mappings, not the opaque adapter payloads used by other lifecycle phases.
-Legacy `tests` keys and scalar/list verify payloads are rejected.
+mappings. Each named test contains exactly one verifier adapter key and its
+options, for example `smoke: {dummy: {}}`. Empty/null test definitions,
+multiple adapter keys, legacy `tests` keys, and scalar/list verify payloads
+are rejected.
 
 ### Adapters
 
-Provisioner, converger, and verifier defaults are declared at configuration
-top level, with explicit phase-adapter or test-verifier overrides. A
-**provisioner** creates and destroys resources; a **converger** applies scenario
+A **provisioner** creates and destroys resources; a **converger** applies scenario
 state changes; a **verifier** runs tests.
 
+The adapter key in each phase or named test is the sole selector. There are no
+top-level or inherited adapter defaults and no separate type selectors.
+Top-level `provisioner`, `converger`, and `verifier`, per-test `verifier`, and
+`provisioner_type`, `converger_type`, and `verifier_type` selectors are rejected.
+Nested and included scenarios use the same local selection rules. Different
+phases and tests may select different adapters independently.
+
+Decision: select adapters directly from their mapping keys to remove redundant
+declarations and prevent a default from disagreeing with the supplied options.
+This intentionally replaces the earlier default/override configuration syntax;
+existing configurations must remove selectors and wrap implicit dummy actions
+and tests in `dummy`. Configuration version remains `1` during this initial,
+unstabilized schema; persisted state and the Ansible protocol do not change.
+
 The current implementation supports `dummy` and `ansible` provisioners and
-convergers; an omitted provisioner defaults to `dummy`. Verifiers support
+convergers. Verifiers support
 `dummy`, `ansible`, and `pytest` (including pytest-testinfra). The Ansible
 converger supports `prepare`, `converge`, and `cleanup`; real idempotence
 checking and other adapters remain deferred.
 
 The dummy provisioner returns one resource with ID and type `mock`, the dummy
 converger performs no action, and the dummy verifier passes every named test by
-default. Dummy phases accept `status: ok|error`; dummy tests accept
+default. Under the `dummy` key, phases accept `status: ok|error`; tests accept
 `status: ok|fail|error` to exercise result handling without external calls.
+`dummy:`, `dummy: null`, and `dummy: {}` all use `status: ok`. Lists currently
+support only dummy phase mappings; any error status makes the phase error.
+Dummy create still returns one mock resource per phase, not per list entry.
+Lists containing real adapters remain deferred and are rejected.
 
 ## Provisioning
 
 CVD does not define what infrastructure `create` means. Provisioning is
-delegated to a provisioner selected by the scenario.
+delegated to the adapter selected by each create/destroy phase mapping.
 
 Provisioners can be bundled, third-party, or project-local. Terraform,
 Kubernetes, OpenStack, containers, and custom executables are possible
@@ -217,9 +236,6 @@ configuration:
 
 ```yaml
 inventory: [inventory.yml]
-provisioner: ansible
-converger: ansible
-verifier: dummy
 ```
 
 CVD passes inventory through the subprocess's comma-separated
@@ -304,8 +320,8 @@ mappings, with the same path and `cvd` extra-vars conventions as the provisioner
 visible to the scenario (ancestors first, followed by its own resources),
 including hosts and non-hosts. Siblings, destroyed resources, and generated
 view artifacts are excluded. Runtime host data also comes through inventory. No result manifest is required:
-a nonzero exit or launch failure is a phase error. Explicit `dummy` mappings
-can override the top-level converger. Lists containing Ansible actions are
+a nonzero exit or launch failure is a phase error. A `dummy` mapping selects
+dummy convergence for that phase. Lists containing Ansible actions are
 rejected until ordered real-adapter lists are implemented.
 
 Generated overlays are persisted under the run's `views` directory and recorded
@@ -329,8 +345,7 @@ create manifest and persisted resource list remain flat.
 
 ## Ansible verifier
 
-`verifier: ansible` selects Ansible playbooks for named tests; each test can
-also override the top-level verifier with `verifier: ansible`:
+An `ansible` mapping selects Ansible for a named test:
 
 ```yaml
 verify:
@@ -354,12 +369,10 @@ options are rejected for Ansible tests.
 
 ## Pytest verifier
 
-`verifier: pytest` selects pytest for named tests; a test can override the
-top-level default with its own `verifier`. Testinfra uses this same adapter
+A `pytest` mapping selects pytest for a named test. Testinfra uses this same adapter
 through the installed `pytest-testinfra` plugin:
 
 ```yaml
-verifier: pytest
 scenarios:
   default:
     verify:
@@ -380,8 +393,8 @@ to the file containing its scenario. It must exist at configuration load time.
 Optional `pytest.args` is an ordered string list passed literally, without a
 shell. CVD runs `pytest ARGS PATH` from the root configuration directory using
 `pytest` from the current `PATH`, so an activated virtual environment works.
-The test's verifier must be `pytest` to accept pytest options; dummy status
-controls do not configure pytest results. No testinfra flags or host selection
+The `pytest` mapping accepts only pytest options; dummy status controls do not
+configure pytest results. No testinfra flags or host selection
 are injected automatically; ordinary pytest tests are also supported.
 
 CVD sets `ANSIBLE_INVENTORY` for each pytest process using the same source order
