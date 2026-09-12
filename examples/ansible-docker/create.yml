@@ -1,4 +1,5 @@
 ---
+# Example of managing non-host resources
 - name: Build an image owned by this scenario invocation
   hosts: localhost
   connection: local
@@ -34,6 +35,7 @@
             attributes:
               reference: "{{ cvd_image_reference }}"
 
+# Example of managing host-like resources
 - name: Create containers declared in the managed inventory group
   hosts: cvd_managed
   connection: local
