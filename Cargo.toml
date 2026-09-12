@@ -13,4 +13,4 @@ thiserror = "2.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-signal-hook-registry = "1.4"
+signal-hook-registry = "1.4.8"

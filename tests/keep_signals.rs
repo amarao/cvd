@@ -12,8 +12,9 @@ use serde_json::{Value, json};
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 // The adapters send actual signals to their waiting CVD parent. Each adapter
-// invocation also observes the preceding state checkpoint, so tests cover both
-// live destruction decisions and persistence without timing-based sleeps.
+// invocation waits for its acknowledgement before returning and observes the
+// preceding state checkpoint. This covers notification timing as well as live
+// destruction decisions and persistence.
 fn run_case(
     initial_keep: bool,
     selector: Option<&str>,
@@ -75,7 +76,7 @@ scenarios:
         fs::write(
             &executable,
             r#"#!/usr/bin/env python3
-import json, os, pathlib, signal, sys
+import json, os, pathlib, signal, sys, time
 
 if pathlib.Path(sys.argv[0]).name == 'pytest':
     context = pathlib.Path(os.environ['ANSIBLE_INVENTORY'].split(',')[-1])
@@ -94,7 +95,20 @@ with (directory / 'calls.jsonl').open('a') as capture:
 
 requested_signal = json.loads(os.environ['CVD_TEST_SIGNALS']).get(call)
 if requested_signal:
+    mode = 'enabled' if requested_signal == 'SIGUSR1' else 'disabled'
+    message = ('\n\nCVD: keep mode ' + mode + ' (' + requested_signal + ')\n').encode()
+    stderr = directory / 'stderr.log'
+    previous = stderr.read_bytes().count(message)
     os.kill(os.getppid(), getattr(signal, requested_signal))
+    # The adapter cannot finish until the listener prints. A message deferred
+    # to a lifecycle checkpoint would time out here and fail the test.
+    deadline = time.monotonic() + 5
+    while stderr.read_bytes().count(message) == previous:
+        assert time.monotonic() < deadline, 'no acknowledgement while adapter was running'
+        time.sleep(0.01)
+    current = json.loads((state_dir / 'runs' / run_id / 'state.json').read_text())
+    assert current['scenarios'][scenario]['phases'][action]['status'] == 'running'
+    assert current['keep'] == state['keep'], 'notification must not write state'
 
 if action == 'create':
     result = {'manifest_version': 1, 'invocation_id': cvd['invocation_id'],
@@ -122,6 +136,7 @@ if call == os.environ.get('CVD_TEST_FAILURE'):
     command
         .args(["run", "--directory"])
         .arg(&directory)
+        .stderr(fs::File::create(directory.join("stderr.log")).unwrap())
         .env_remove("ANSIBLE_INVENTORY")
         .env("PATH", env::join_paths(paths).unwrap())
         .env("CVD_TEST_SIGNALS", serde_json::to_string(&signals).unwrap());
@@ -135,13 +150,14 @@ if call == os.environ.get('CVD_TEST_FAILURE'):
         command.env("CVD_TEST_FAILURE", failure);
     }
     let output = command.output().unwrap();
+    let stderr = fs::read_to_string(directory.join("stderr.log")).unwrap();
     // Even an intentionally failed run must exit normally, not via SIGUSR1/2.
     assert_eq!(
         output.status.code(),
         Some(if failure.is_some() { 1 } else { 0 }),
         "stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        stderr
     );
 
     let calls: Vec<Value> = fs::read_to_string(directory.join("calls.jsonl"))
@@ -150,13 +166,25 @@ if call == os.environ.get('CVD_TEST_FAILURE'):
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     let mut keep = initial_keep;
+    let mut expected_notifications = String::new();
     for record in &calls {
         let call = record["call"].as_str().unwrap();
         assert_eq!(record["keep"], keep, "snapshot before {call}");
         if let Some(signal) = signals.get(call) {
             keep = signal == "SIGUSR1";
+            let mode = if keep { "enabled" } else { "disabled" };
+            expected_notifications.push_str(&format!(
+                "\n\nCVD: keep mode {mode} ({})\n",
+                signal.as_str().unwrap()
+            ));
         }
     }
+    assert!(
+        stderr.starts_with(&expected_notifications),
+        "stderr: {stderr:?}"
+    );
+    assert_eq!(stderr.matches("CVD: keep mode").count(), signals.len());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("CVD: keep mode"));
     for call in signals.keys() {
         assert!(calls.iter().any(|record| record["call"] == *call));
     }

@@ -532,8 +532,27 @@ revisit destruction already skipped for an earlier scenario. This boundary
 preserves provider execution and lifecycle ordering while allowing operators
 to retain resources when they discover a problem during a long-running phase.
 
-Signal handlers only update the live policy. The next normal lifecycle state
-write, including the final write, snapshots it into the existing `keep` field
+On receipt, a background listener promptly prints an acknowledgement to stderr,
+including while an Ansible or pytest subprocess is still running. Each message
+starts with two newline characters and ends with one newline:
+
+```text
+\n\nCVD: keep mode enabled (SIGUSR1)\n
+\n\nCVD: keep mode disabled (SIGUSR2)\n
+```
+
+The escapes above represent actual newline characters. Repeated requests for
+the same setting also receive acknowledgements. Output may interleave with
+adapter output. Messages are live notifications and are not persisted or
+replayed by `state-report`. Notification output is best-effort: a full internal
+buffer or stderr failure must not prevent the policy update or interrupt an
+adapter. The listener drains queued notifications on normal run exit.
+
+Signal handlers update the live policy and notify the listener without blocking;
+formatting and terminal output happen outside the handlers. This gives operators
+feedback during long-running phases without making signal handling wait for
+terminal output. The next normal lifecycle state write, including the final
+write, snapshots it into the existing `keep` field
 as described in [state.md](state.md). This keeps state persistence in the
 lifecycle thread and avoids filesystem operations inside signal handlers.
 
