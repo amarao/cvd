@@ -7,9 +7,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "cvd",
     version,
+    disable_version_flag = true,
     about = "Create, verify, and destroy test resources"
 )]
 pub struct Cli {
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: Option<bool>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -151,9 +155,21 @@ pub fn configuration_file(file: &std::path::Path, directory: Option<&std::path::
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{Parser, error::ErrorKind};
 
     use super::{Cli, Command, ViewFormat};
+
+    #[test]
+    fn prints_version_with_short_and_long_flags() {
+        for flag in ["-v", "--version"] {
+            let error = Cli::try_parse_from(["cvd", flag]).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+            assert_eq!(
+                error.to_string(),
+                format!("cvd {}\n", env!("CARGO_PKG_VERSION"))
+            );
+        }
+    }
 
     #[test]
     fn directory_option_is_available_on_all_commands_and_conflicts_with_file() {
