@@ -1,6 +1,6 @@
 FROM alpine:3.20
 
-RUN apk add --no-cache busybox-extras \
+RUN apk add --no-cache busybox-extras=1.36.1-r31 \
     && mkdir -p /srv/www
 
 EXPOSE 8080
