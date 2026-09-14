@@ -8,7 +8,7 @@
         that:
           - greeting == 'from group_vars'
           - "'external' in groups['webservers']"
-          - cvd.action in ['prepare', 'converge', 'cleanup']
+          - cvd.action in ['prepare', 'converge', 'side_effect', 'cleanup']
           - cvd.resources | length == 1
           - cvd.resources[0].id == 'local-web'
           - cvd.resources_by_type['test.local'] == cvd.resources

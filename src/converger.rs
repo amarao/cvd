@@ -71,6 +71,7 @@ impl Converger for AnsibleConverger {
             let action = match phase {
                 LifecyclePhase::Prepare => "prepare",
                 LifecyclePhase::Converge => "converge",
+                LifecyclePhase::SideEffect => "side_effect",
                 LifecyclePhase::Cleanup => "cleanup",
                 _ => {
                     return Err(ConvergerError(

@@ -210,6 +210,9 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             if self.skip(path, LifecyclePhase::Verify).is_err() {
                 return self.finish_after_failure(scenario, path);
             }
+            if self.run_converger_phase(scenario, path, LifecyclePhase::SideEffect) {
+                return self.finish_after_failure(scenario, path);
+            }
             let Some(child) = scenario.scenarios.get(child_name) else {
                 self.execution_error(
                     path,
@@ -229,6 +232,9 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             } else {
                 self.skip(path, LifecyclePhase::Verify).is_err()
             };
+            if !had_error {
+                had_error = self.run_converger_phase(scenario, path, LifecyclePhase::SideEffect);
+            }
             if !had_error {
                 for (child_name, child) in scenario.scenarios.iter() {
                     let child_path = path_with_child(path, child_name);
@@ -553,6 +559,7 @@ fn render_persisted_scenario<W: Write>(
         LifecyclePhase::Converge,
         LifecyclePhase::Idempotence,
         LifecyclePhase::Verify,
+        LifecyclePhase::SideEffect,
     ] {
         if let Some(phase_state) = scenario.phases.get(&phase) {
             write_phase_result(
@@ -797,6 +804,7 @@ fn configured_phase(phase: &LifecyclePhase) -> ConfiguredPhase {
         LifecyclePhase::Prepare => ConfiguredPhase::Prepare,
         LifecyclePhase::Converge => ConfiguredPhase::Converge,
         LifecyclePhase::Idempotence => ConfiguredPhase::Idempotence,
+        LifecyclePhase::SideEffect => ConfiguredPhase::SideEffect,
         LifecyclePhase::Verify => ConfiguredPhase::Verify,
         LifecyclePhase::Cleanup => ConfiguredPhase::Cleanup,
         LifecyclePhase::Destroy => ConfiguredPhase::Destroy,
@@ -809,6 +817,7 @@ fn phase_name(phase: &LifecyclePhase) -> &'static str {
         LifecyclePhase::Prepare => "prepare",
         LifecyclePhase::Converge => "converge",
         LifecyclePhase::Idempotence => "idempotence",
+        LifecyclePhase::SideEffect => "side_effect",
         LifecyclePhase::Verify => "verify",
         LifecyclePhase::Cleanup => "cleanup",
         LifecyclePhase::Destroy => "destroy",
@@ -873,6 +882,8 @@ scenarios:
     prepare:
       dummy:
     converge:
+      dummy:
+    side_effect:
       dummy:
     cleanup:
       dummy:
@@ -974,6 +985,10 @@ scenarios:
             PhaseStatus::Skipped
         );
         assert_eq!(
+            state.scenarios["default"].phases[&LifecyclePhase::SideEffect].status,
+            PhaseStatus::Pass
+        );
+        assert_eq!(
             state.scenarios["default/restart"].test_results[0].status,
             VerifierStatus::Pass
         );
@@ -996,7 +1011,7 @@ scenarios:
     }
 
     #[test]
-    fn create_completes_before_configured_converger_phases() {
+    fn configured_phases_run_in_lifecycle_order() {
         let config = Config::from_yaml(CONFIG).unwrap();
         let (store, directory) = test_store("create-order");
         let provisioner = DummyProvisioner;
@@ -1022,7 +1037,62 @@ scenarios:
         assert!(output.contains("default::converge running\n"));
         let create = output.find("default::create: 1 resource added").unwrap();
         let prepare = output.find("default::prepare pass").unwrap();
+        let converge = output.find("default::converge pass").unwrap();
+        let idempotence = output.find("default::idempotence skipped").unwrap();
+        let side_effect = output.find("default::side_effect pass").unwrap();
+        let verify = output.find("default::verify pass").unwrap();
         assert!(create < prepare);
+        assert!(prepare < converge);
+        assert!(converge < idempotence);
+        assert!(idempotence < verify);
+        assert!(verify < side_effect);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn side_effect_error_stops_child_work_and_still_unwinds() {
+        let config = Config::from_yaml(&CONFIG.replacen(
+            "    side_effect:\n      dummy:",
+            "    side_effect:\n      dummy:\n        status: error",
+            1,
+        ))
+        .unwrap();
+        let (store, directory) = test_store("side-effect-error");
+        let (outcome, state) = LifecycleRunner::new(
+            &config,
+            &store,
+            state(Some("default"), false),
+            &DummyProvisioner,
+            &DummyConverger,
+            &DummyVerifier,
+            Vec::new(),
+        )
+        .run(Some("default"))
+        .unwrap();
+
+        assert_eq!(outcome.execution_errors, 1);
+        let scenario = &state.scenarios["default"];
+        assert_eq!(
+            scenario.phases[&LifecyclePhase::SideEffect].status,
+            PhaseStatus::Error
+        );
+        assert_eq!(
+            scenario.phases[&LifecyclePhase::Verify].status,
+            PhaseStatus::Pass
+        );
+        assert!(!state.scenarios.contains_key("default/restart"));
+        assert_eq!(
+            scenario.phases[&LifecyclePhase::Cleanup].status,
+            PhaseStatus::Pass
+        );
+        assert_eq!(
+            scenario.phases[&LifecyclePhase::Destroy].status,
+            PhaseStatus::Pass
+        );
+        assert_eq!(
+            state.primary_error.as_ref().unwrap().phase,
+            LifecyclePhase::SideEffect
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1127,6 +1197,7 @@ scenarios:
         assert!(!report.contains("\x1b["));
         assert!(report.contains("Scenario: default\n"));
         assert!(report.contains("default::idempotence skipped\n"));
+        assert!(report.contains("default::side_effect pass\n"));
         assert!(report.contains("Scenario: default/restart\n"));
         assert!(report.contains("default/restart::create: 1 resource added\n"));
         assert!(report.contains("Scenario: default/restart/deep\n"));
@@ -1135,6 +1206,7 @@ scenarios:
         assert!(report.contains("Scenario: default/restart: passed\n"));
         assert!(report.contains("Scenario: default: passed\n"));
         let parent_verify = report.find("default::verify skipped\n").unwrap();
+        let parent_side_effect = report.find("default::side_effect pass\n").unwrap();
         let child_entrance = report.find("Scenario: default/restart\n").unwrap();
         let child_verdict = report.find("Scenario: default/restart: passed\n").unwrap();
         let parent_cleanup = report.rfind("default::cleanup pass\n").unwrap();
@@ -1142,7 +1214,8 @@ scenarios:
             .rfind("default::destroy: 1 resource deleted\n")
             .unwrap();
         let parent_verdict = report.rfind("Scenario: default: passed\n").unwrap();
-        assert!(parent_verify < child_entrance);
+        assert!(parent_verify < parent_side_effect);
+        assert!(parent_side_effect < child_entrance);
         assert!(child_entrance < child_verdict);
         assert!(child_verdict < parent_cleanup);
         assert!(parent_cleanup < parent_destroy);

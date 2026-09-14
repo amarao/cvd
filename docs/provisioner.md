@@ -5,7 +5,7 @@
 CVD runs each scenario through its declared phases in this order:
 
 ```text
-create → prepare → converge → idempotence → verify
+create → prepare → converge → idempotence → verify → side_effect
        → child scenarios → cleanup → destroy
 ```
 
@@ -85,7 +85,7 @@ During destroy, each managed host also has the inventory variable `cvd_resource`
 | `cvd.input_file` | Path to the JSON input containing the top-level `cvd` mapping. |
 | `cvd.result_file` | Path where create playbook must write its JSON result. |
 | `cvd.invocation_id` | Identifier for this invocation; copy it into the create result. |
-| `cvd.action` | `create` or `destroy`. |
+| `cvd.action` | Current phase: `create`, `prepare`, `converge`, `verify`, `side_effect`, `cleanup`, or `destroy`. |
 | `cvd.scenario_selector` | Scenario selector, such as `default/restart`. |
 | `cvd.vars` | This phase's configured `vars`, or an empty mapping. |
 | `cvd.resources` | Empty during create; owned non-host resources during destroy; all existing visible resources during convergence. |
@@ -207,9 +207,9 @@ inventory variables or your own lists in `cvd.vars`, such as `images` and
 `networks`. Report actual results in one manifest list; separate lists can be
 combined with `resources: "{{ created_containers + cached_images }}"`.
 
-During prepare, converge, and cleanup, both views contain existing resources
-from the scenario and its ancestors, including host resources. During destroy,
-they contain only owned non-host resources; inherited resources are excluded.
+During prepare, converge, side effect, and cleanup, both views contain existing
+resources from the scenario and its ancestors, including host resources. During
+destroy, they contain only owned non-host resources; inherited resources are excluded.
 The flat list keeps resource order, and each typed list preserves the relative
 order of its entries. Type names containing dots use dictionary access, such
 as `cvd.resources_by_type.get('docker.image', [])`.

@@ -42,6 +42,7 @@ pub enum LifecyclePhase {
     Converge,
     Idempotence,
     Verify,
+    SideEffect,
     Cleanup,
     Destroy,
 }
@@ -723,6 +724,7 @@ mod tests {
         state.complete_phase("default", LifecyclePhase::Prepare, PhaseStatus::Skipped);
         state.mark_phase_running("default", LifecyclePhase::Create);
         state.complete_phase("default", LifecyclePhase::Create, PhaseStatus::Pass);
+        state.complete_phase("default", LifecyclePhase::SideEffect, PhaseStatus::Pass);
         state.enter_scenario("default/restart", Some("default".into()));
         state.record_test_result(
             "default/restart",

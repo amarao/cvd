@@ -465,7 +465,7 @@ fn dummy_example_runs_every_phase_successfully() {
             .join("state.json"),
     );
     let scenario = &state["scenarios"]["default"];
-    let phases = [
+    let passed_phases = [
         "create",
         "prepare",
         "converge",
@@ -474,10 +474,11 @@ fn dummy_example_runs_every_phase_successfully() {
         "cleanup",
         "destroy",
     ];
-    assert_eq!(scenario["phases"].as_object().unwrap().len(), phases.len());
-    for phase in phases {
+    assert_eq!(scenario["phases"].as_object().unwrap().len(), 8);
+    for phase in passed_phases {
         assert_eq!(scenario["phases"][phase]["status"], "pass", "phase {phase}");
     }
+    assert_eq!(scenario["phases"]["side_effect"]["status"], "skipped");
     assert_eq!(scenario["test_results"][0]["status"], "pass");
     fs::remove_dir_all(directory).unwrap();
 }
@@ -683,7 +684,13 @@ fn ansible_inventory_overlay_preserves_sources_and_cleanup_after_errors() {
         let directory = test_directory(&format!("inventory-{mode}"));
         let bin = directory.join("bin");
         fs::create_dir_all(&bin).unwrap();
-        for playbook in ["create.yml", "converge.yml", "cleanup.yml", "destroy.yml"] {
+        for playbook in [
+            "create.yml",
+            "converge.yml",
+            "side-effect.yml",
+            "cleanup.yml",
+            "destroy.yml",
+        ] {
             fs::write(directory.join(playbook), "---\n").unwrap();
         }
         fs::write(
@@ -692,7 +699,7 @@ fn ansible_inventory_overlay_preserves_sources_and_cleanup_after_errors() {
         )
         .unwrap();
         let configuration = directory.join("cvd.yml");
-        fs::write(&configuration, "version: 1\ninventory: [inventory.yml]\nscenarios:\n  host:\n    create:\n      ansible:\n        playbook: create.yml\n    converge:\n      ansible:\n        playbook: converge.yml\n    cleanup:\n      ansible:\n        playbook: cleanup.yml\n    destroy:\n      ansible:\n        playbook: destroy.yml\n").unwrap();
+        fs::write(&configuration, "version: 1\ninventory: [inventory.yml]\nscenarios:\n  host:\n    create:\n      ansible:\n        playbook: create.yml\n    converge:\n      ansible:\n        playbook: converge.yml\n    side_effect:\n      ansible:\n        playbook: side-effect.yml\n    cleanup:\n      ansible:\n        playbook: cleanup.yml\n    destroy:\n      ansible:\n        playbook: destroy.yml\n").unwrap();
         let mut original_sources = vec![directory.join("inventory.yml")];
         let inherited = if mode == "inherited" {
             let sources = [
@@ -752,7 +759,7 @@ if cvd['action'] == 'create':
     resources = [{'id': 'container-id', 'type': 'docker.container', 'attributes': {'ansible': binding}}, {'id': 'network-id', 'type': 'docker.network'}]
     if mode == 'duplicate': resources.append({'id': 'other-id', 'type': 'container', 'attributes': {'ansible': binding}})
     json.dump({'manifest_version': 1, 'invocation_id': cvd['invocation_id'], 'complete': True, 'resources': resources}, open(cvd['result_file'], 'w'))
-elif cvd['action'] in ['converge', 'cleanup']:
+elif cvd['action'] in ['converge', 'side_effect', 'cleanup']:
     assert cvd['resources_by_type']['docker.container'][0]['id'] == 'container-id'
     assert cvd['resources_by_type']['docker.network'][0]['id'] == 'network-id'
     assert len(sources) == len(original) + 1
@@ -839,6 +846,11 @@ print(json.dumps({'all': {'hosts': ['web']}}))
             let overlay = calls[1]["overlay"].as_str().unwrap();
             assert!(overlay.contains("actual-container"));
             assert!(!overlay.contains("network-id"));
+            if mode != "converge-error" {
+                assert_eq!(calls[2]["action"], "side_effect");
+                assert_eq!(calls[2]["resources"], calls[1]["resources"]);
+                assert_eq!(scenario["phases"]["side_effect"]["status"], "pass");
+            }
             assert!(
                 Path::new(
                     scenario["views"]["ansible_inventory"]["attributes"]["path"]

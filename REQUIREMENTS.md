@@ -66,9 +66,10 @@ scenarios to arbitrary depth and can define any of these optional phases:
 3. `converge`
 4. `idempotence`
 5. `verify`
-6. child scenarios
-7. `cleanup`
-8. `destroy`
+6. `side_effect`
+7. child scenarios
+8. `cleanup`
+9. `destroy`
 
 Each scenario explicitly declares the phases it enables as keys. Omitted phase
 keys are recorded as skipped. `verify` contains named test definitions as
@@ -83,10 +84,18 @@ resources and state values of its own. Its cleanup and destruction affect
 only state owned by that child. Resource masking is required but not yet
 implemented; its inventory semantics remain deferred below.
 
-A child's `converge` can perform a side effect, such as a restart or
-reconfiguration, before its own verification. No separate side-effect phase is
-needed. Siblings are independent; nested siblings share only inherited parent
-state and resources.
+A scenario's optional `side_effect` applies a deliberate mutation, such as a
+restart, outage, or reconfiguration, after that scenario's verification and
+before its child scenarios. The scenario verifies its baseline, applies the
+side effect, and a child can verify the resulting or recovered state before
+applying the next effect in a chain.
+`side_effect` is a converger phase and uses the same adapter-selection and
+resource-visibility rules as `prepare` and `converge`. Siblings are independent;
+nested siblings share only inherited parent state and resources.
+
+Decision: use the YAML key and protocol action `side_effect` (with an
+underscore) to match the configuration's identifier naming and avoid separate
+spellings at the configuration and adapter boundaries.
 
 Children are declared in an ordered `nested` list. Each entry has a `name` and
 either an inline scenario body or an `include` path. An included file contains
@@ -159,13 +168,15 @@ declarations and prevent a default from disagreeing with the supplied options.
 This intentionally replaces the earlier default/override configuration syntax;
 existing configurations must remove selectors and wrap implicit dummy actions
 and tests in `dummy`. Configuration version remains `1` during this initial,
-unstabilized schema; persisted state and the Ansible protocol do not change.
+unstabilized schema. The additive `side_effect` phase does not change the state
+schema or Ansible protocol versions: existing values keep their meanings and
+existing state remains readable.
 
 The current implementation supports `dummy` and `ansible` provisioners and
 convergers. Verifiers support
 `dummy`, `ansible`, and `pytest` (including pytest-testinfra). The Ansible
-converger supports `prepare`, `converge`, and `cleanup`; real idempotence
-checking and other adapters remain deferred.
+converger supports `prepare`, `converge`, `side_effect`, and `cleanup`; real
+idempotence checking and other adapters remain deferred.
 
 The dummy provisioner returns one resource with ID and type `mock`, the dummy
 converger performs no action, and the dummy verifier passes every named test by
@@ -294,8 +305,8 @@ Bound hosts can represent physical servers, virtual machines, containers, or
 pseudohosts used to call APIs. Inventory participation depends on the explicit
 binding rather than on a particular resource type.
 
-Before each Ansible `prepare`, `converge`, or `cleanup` invocation, and before
-each Ansible or pytest test in `verify`, CVD generates
+Before each Ansible `prepare`, `converge`, `side_effect`, or `cleanup`
+invocation, and before each Ansible or pytest test in `verify`, CVD generates
 a private YAML inventory overlay from existing resources owned by that scenario
 and its ancestors. Unrelated siblings and destroyed resources are excluded.
 Ancestor resources precede child resources and each manifest's order is
@@ -504,14 +515,15 @@ Cleanup is stack-based and is best-effort:
 
 - the active child is cleaned before its parent;
 - a scenario's `cleanup` runs if scenario execution was entered and create was
-  successful or skipped, including after `converge`, `verify`, or child failure;
+  successful or skipped, including after `converge`, `side_effect`, `verify`,
+  or child failure;
 - `destroy` applies only to resources owned by that scenario;
 - `destroy` may run even if create was not called;
 - a partial `create` may persist discovered/created resources so destruction can be
   attempted (provider specific);
 - cleanup and destruction errors do not hide the primary failure;
 - keep mode can suppress cleanup or destruction for inspection;
-- cleanup/destroy errors skip later child, converge, and verify work, but do not
+- lifecycle errors skip later `verify`, `side_effect`, and child work, but do not
   prevent remaining applicable cleanup and destroy operations.
 
 Current `--keep` suppresses destruction only; suppressing cleanup remains

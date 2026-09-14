@@ -4,7 +4,7 @@
 
 By default CVD removes all created resources after verify and cleanup phases.
 
-When something went wrong during converge or verify phases, operators may want to inspect
+When something went wrong during converge, side effect, or verify phases, operators may want to inspect
 the resulting resources.
 
 There are a few ways to instruct CVD to keep resources after creation:

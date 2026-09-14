@@ -128,6 +128,7 @@ pub enum ConfiguredPhase {
     Converge,
     Idempotence,
     Verify,
+    SideEffect,
     Cleanup,
     Destroy,
 }
@@ -220,6 +221,8 @@ struct RawScenario {
     #[serde(default)]
     idempotence: AbsentOrValue,
     #[serde(default)]
+    side_effect: AbsentOrValue,
+    #[serde(default)]
     verify: AbsentOrValue,
     #[serde(default)]
     cleanup: AbsentOrValue,
@@ -244,6 +247,8 @@ struct RawNestedScenario {
     #[serde(default)]
     idempotence: AbsentOrValue,
     #[serde(default)]
+    side_effect: AbsentOrValue,
+    #[serde(default)]
     verify: AbsentOrValue,
     #[serde(default)]
     cleanup: AbsentOrValue,
@@ -260,6 +265,7 @@ impl RawNestedScenario {
             prepare: self.prepare,
             converge: self.converge,
             idempotence: self.idempotence,
+            side_effect: self.side_effect,
             verify: self.verify,
             cleanup: self.cleanup,
             destroy: self.destroy,
@@ -272,6 +278,7 @@ impl RawNestedScenario {
             || self.prepare.is_present()
             || self.converge.is_present()
             || self.idempotence.is_present()
+            || self.side_effect.is_present()
             || self.verify.is_present()
             || self.cleanup.is_present()
             || self.destroy.is_present()
@@ -496,6 +503,7 @@ fn resolve_scenario(
         prepare,
         converge,
         idempotence,
+        side_effect,
         verify,
         cleanup,
         destroy,
@@ -525,6 +533,7 @@ fn resolve_scenario(
         (ConfiguredPhase::Prepare, prepare),
         (ConfiguredPhase::Converge, converge),
         (ConfiguredPhase::Idempotence, idempotence),
+        (ConfiguredPhase::SideEffect, side_effect),
         (ConfiguredPhase::Cleanup, cleanup),
         (ConfiguredPhase::Destroy, destroy),
     ] {
@@ -732,6 +741,7 @@ fn validate_action_mapping(
                     | ConfiguredPhase::Destroy
                     | ConfiguredPhase::Prepare
                     | ConfiguredPhase::Converge
+                    | ConfiguredPhase::SideEffect
                     | ConfiguredPhase::Cleanup
             ) =>
         {
@@ -740,7 +750,7 @@ fn validate_action_mapping(
         }
         "ansible" => {
             return Err(
-                "Ansible is supported only for create, prepare, converge, cleanup, and destroy"
+                "Ansible is supported only for create, prepare, converge, side_effect, cleanup, and destroy"
                     .to_owned(),
             );
         }
@@ -774,10 +784,11 @@ fn resolve_ansible_options(
             | ConfiguredPhase::Destroy
             | ConfiguredPhase::Prepare
             | ConfiguredPhase::Converge
+            | ConfiguredPhase::SideEffect
             | ConfiguredPhase::Cleanup
     ) {
         return Err(
-            "Ansible is supported only for create, prepare, converge, cleanup, and destroy"
+            "Ansible is supported only for create, prepare, converge, side_effect, cleanup, and destroy"
                 .to_owned(),
         );
     }
@@ -803,6 +814,7 @@ fn configured_phase_name(phase: ConfiguredPhase) -> &'static str {
         ConfiguredPhase::Prepare => "prepare",
         ConfiguredPhase::Converge => "converge",
         ConfiguredPhase::Idempotence => "idempotence",
+        ConfiguredPhase::SideEffect => "side_effect",
         ConfiguredPhase::Verify => "verify",
         ConfiguredPhase::Cleanup => "cleanup",
         ConfiguredPhase::Destroy => "destroy",
@@ -837,6 +849,7 @@ scenarios:
     prepare:
       - dummy:
     converge: {dummy: {}}
+    side_effect: {dummy: {}}
     cleanup:
       dummy:
     destroy:
@@ -933,6 +946,7 @@ scenarios:
             default.phase_value(ConfiguredPhase::Converge),
             Some(&serde_yaml::from_str::<serde_yaml::Value>("dummy: {}").unwrap())
         );
+        assert!(default.has_phase(ConfiguredPhase::SideEffect));
         assert!(
             !config
                 .scenario("default/restart")
@@ -1017,7 +1031,14 @@ scenarios:
                 ..
             })
         ));
-        for phase in ["create", "prepare", "converge", "cleanup", "destroy"] {
+        for phase in [
+            "create",
+            "prepare",
+            "converge",
+            "side_effect",
+            "cleanup",
+            "destroy",
+        ] {
             let yaml = format!(
                 "version: 1\nscenarios:\n  root:\n    {phase}:\n      ansible:\n        playbook: converge.yml\n"
             );
@@ -1294,6 +1315,7 @@ scenarios:
             "prepare",
             "converge",
             "idempotence",
+            "side_effect",
             "cleanup",
             "destroy",
         ] {
@@ -1377,6 +1399,7 @@ scenarios:
 create: {ansible: {playbook: playbook.yml}}
 prepare: {dummy: {}}
 converge: {ansible: {playbook: playbook.yml}}
+side_effect: {ansible: {playbook: playbook.yml}}
 cleanup: {dummy: {}}
 destroy: {ansible: {playbook: playbook.yml}}
 verify:
@@ -1392,6 +1415,7 @@ verify:
         for phase in [
             ConfiguredPhase::Create,
             ConfiguredPhase::Converge,
+            ConfiguredPhase::SideEffect,
             ConfiguredPhase::Destroy,
         ] {
             assert_eq!(

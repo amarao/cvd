@@ -55,7 +55,7 @@ with additional components (Rook, Velero, Prometheus).
   backup, confirm that it's been backed up, and then restore this deployment
   into another namespace. We verify that the restored application is accessible via
   ingress (so our SSL code is provisioning certificates as expected).
-* We introduce a `side-effect` (`echo b > /proc/sysrq-trigger`, admittedly harsh, but
+* We introduce a `side_effect` (`echo b > /proc/sysrq-trigger`, admittedly harsh, but
   truly simulating a brief outage).
 * We verify that we receive alerts from Prometheus indicating that some nodes are down.
 * We also verify that those alerts stop firing, meaning the cluster has come back online.

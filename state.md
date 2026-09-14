@@ -49,6 +49,11 @@ Internal execution status is `pending` or `running`. A completed phase result is
 `skipped`, `pass`, or `error`. Verifier results can additionally contain
 `fail`.
 
+The `side_effect` lifecycle phase is an additive enum value within state schema
+version 3. Existing schema-3 state contains no such value and remains readable;
+no existing field or value changed meaning, so rejecting all existing run history
+via a schema bump would not improve recovery safety.
+
 ## Write and recovery rules
 
 - Write state before starting a phase with status `running`.

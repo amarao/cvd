@@ -3,8 +3,9 @@
 * Create (Provisioner)
 * Prepare (Converger)
 * Converge (Converger)
+* Idempotence (Converger) «not implemented yet»
 * Verify (Verifier)
-* Side-effects (Converger) «not implemented yet»
+* Side effect (Converger)
 * Cleanup (Converger)
 * Destroy (Provisioner)
 
@@ -29,8 +30,11 @@ Supported provisioners:
 
 Converger is responsible for deploying production code on freshly created ephemeral
 infrastructure. It is also responsible for doing preparation/cleanup and for introducing
-side effects. It is possible to combine different convergers (e.g., to use Terraform for
-the converge phase, run one side effect with Ansible, and another with 'exec').
+side effects. A scenario's `side_effect` runs after its verification and before its
+children. This lets a parent verify a baseline and apply an effect, then lets a child
+verify the changed or recovered state. It is possible to combine different convergers
+(e.g., to use Terraform for the converge phase, run one side effect with Ansible, and
+another with 'exec').
 
 Supported convergers:
 
