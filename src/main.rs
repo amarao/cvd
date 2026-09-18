@@ -5,6 +5,7 @@ mod converger;
 mod inventory;
 mod keep;
 mod lifecycle;
+mod process;
 mod provisioner;
 mod state;
 mod verifier;
@@ -15,7 +16,7 @@ use std::{
     hash::{Hash, Hasher},
     io::{self, IsTerminal, Write},
     path::PathBuf,
-    process,
+    process as os_process,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -74,7 +75,7 @@ enum AppError {
 fn main() {
     if let Err(error) = run_cli() {
         eprintln!("cvd: {error}");
-        process::exit(1);
+        os_process::exit(1);
     }
 }
 
@@ -268,7 +269,7 @@ fn run_identifier() -> String {
         .unwrap_or_default()
         .as_millis();
     let sequence = NEXT_RUN_IDENTIFIER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("run-{}-{milliseconds}-{sequence}", process::id())
+    format!("run-{}-{milliseconds}-{sequence}", os_process::id())
 }
 
 static NEXT_RUN_IDENTIFIER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

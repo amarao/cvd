@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fmt, fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use indexmap::IndexMap;
@@ -29,6 +30,8 @@ pub struct Config {
 
 #[derive(Debug)]
 pub struct Scenario {
+    /// A fresh budget for each phase, resolved through scenario inheritance.
+    pub timeout: Duration,
     phases: BTreeMap<ConfiguredPhase, PhaseDefinition>,
     pub tests: TestMap,
     pub scenarios: ScenarioMap,
@@ -213,6 +216,8 @@ impl TestMap {
 #[serde(deny_unknown_fields)]
 struct RawScenario {
     #[serde(default)]
+    timeout: AbsentOrValue,
+    #[serde(default)]
     create: AbsentOrValue,
     #[serde(default)]
     prepare: AbsentOrValue,
@@ -236,6 +241,8 @@ struct RawScenario {
 #[serde(deny_unknown_fields)]
 struct RawNestedScenario {
     name: String,
+    #[serde(default)]
+    timeout: AbsentOrValue,
     #[serde(default)]
     include: Option<PathBuf>,
     #[serde(default)]
@@ -261,6 +268,7 @@ struct RawNestedScenario {
 impl RawNestedScenario {
     fn into_scenario(self) -> RawScenario {
         RawScenario {
+            timeout: self.timeout,
             create: self.create,
             prepare: self.prepare,
             converge: self.converge,
@@ -274,7 +282,8 @@ impl RawNestedScenario {
     }
 
     fn has_inline_content(&self) -> bool {
-        self.create.is_present()
+        self.timeout.is_present()
+            || self.create.is_present()
             || self.prepare.is_present()
             || self.converge.is_present()
             || self.idempotence.is_present()
@@ -375,7 +384,9 @@ pub enum ConfigError {
     },
     #[error("included scenario cycle at `{0}`")]
     IncludeCycle(PathBuf),
-    #[error("scenario include `{path}` cannot be combined with inline phases or children")]
+    #[error(
+        "scenario include `{path}` cannot be combined with inline phases, timeout, or children"
+    )]
     IncludeWithInlineContent { path: String },
     #[error("invalid scenario `{scenario}` {phase} phase: {reason}")]
     InvalidPhase {
@@ -485,7 +496,14 @@ fn resolve_named_scenarios(
     let mut scenarios = IndexMap::new();
     for (name, raw_scenario) in raw.0 {
         let path = parent.map_or_else(|| name.clone(), |parent| format!("{parent}/{name}"));
-        let scenario = resolve_scenario(raw_scenario, base, include_stack, source_material, &path)?;
+        let scenario = resolve_scenario(
+            raw_scenario,
+            base,
+            include_stack,
+            source_material,
+            &path,
+            Duration::from_secs(600),
+        )?;
         scenarios.insert(name, scenario);
     }
     Ok(ScenarioMap(scenarios))
@@ -497,8 +515,10 @@ fn resolve_scenario(
     include_stack: &mut Vec<PathBuf>,
     source_material: &mut String,
     path: &str,
+    inherited_timeout: Duration,
 ) -> Result<Scenario, ConfigError> {
     let RawScenario {
+        timeout,
         create,
         prepare,
         converge,
@@ -509,6 +529,21 @@ fn resolve_scenario(
         destroy,
         nested,
     } = raw;
+    let timeout = match timeout.0 {
+        None => inherited_timeout,
+        Some(value) => {
+            let seconds = value
+                .as_u64()
+                .filter(|seconds| *seconds > 0 && *seconds <= u32::MAX as u64)
+                .ok_or_else(|| ConfigError::InvalidScenario {
+                    path: path.to_owned(),
+                    reason:
+                        "timeout must be a positive integer number of seconds (at most 4294967295)"
+                            .to_owned(),
+                })?;
+            Duration::from_secs(seconds)
+        }
+    };
     let mut phases = BTreeMap::new();
     let mut tests = NamedMap::<Test>::default();
     if let Some(value) = verify.0 {
@@ -601,6 +636,7 @@ fn resolve_scenario(
                 include_stack,
                 source_material,
                 &child_path,
+                timeout,
             );
             include_stack.pop();
             resolved?
@@ -611,6 +647,7 @@ fn resolve_scenario(
                 include_stack,
                 source_material,
                 &child_path,
+                timeout,
             )?
         };
         child_scenarios.insert(name, resolved);
@@ -650,6 +687,7 @@ fn resolve_scenario(
         }
     }
     Ok(Scenario {
+        timeout,
         phases,
         tests: TestMap(tests.0),
         scenarios: ScenarioMap(child_scenarios),
@@ -1455,5 +1493,70 @@ verify:
             Config::from_yaml(&config),
             Err(ConfigError::UnsupportedVersion { found: 2 })
         ));
+    }
+
+    #[test]
+    fn phase_timeout_defaults_inherits_and_overrides() {
+        let config = Config::from_yaml("version: 1\nscenarios:\n  default: {}\n  root:\n    timeout: 42\n    nested:\n      - name: inherited\n      - name: override\n        timeout: 3\n        nested:\n          - name: leaf\n").unwrap();
+        for (path, seconds) in [
+            ("default", 600),
+            ("root", 42),
+            ("root/inherited", 42),
+            ("root/override", 3),
+            ("root/override/leaf", 3),
+        ] {
+            assert_eq!(config.scenario(path).unwrap().timeout.as_secs(), seconds);
+        }
+    }
+
+    #[test]
+    fn phase_timeout_rejects_invalid_values() {
+        for value in [
+            "0",
+            "-1",
+            "1.5",
+            "null",
+            "true",
+            "'60'",
+            "10m",
+            "[]",
+            "{}",
+            "4294967296",
+        ] {
+            let error = Config::from_yaml(&format!(
+                "version: 1\nscenarios:\n  root:\n    timeout: {value}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("timeout must be a positive integer"),
+                "{value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn included_scenario_timeout_inherits_or_overrides_in_its_body() {
+        let directory =
+            std::env::temp_dir().join(format!("cvd-timeout-include-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("cvd.yml");
+        let yaml = "version: 1\nscenarios:\n  root:\n    timeout: 42\n    nested:\n      - name: child\n        include: child.yml\n";
+        fs::write(directory.join("child.yml"), "verify: {}\n").unwrap();
+        let config = Config::from_yaml_at(yaml, &path).unwrap();
+        assert_eq!(config.scenario("root/child").unwrap().timeout.as_secs(), 42);
+        fs::write(directory.join("child.yml"), "timeout: 5\nverify: {}\n").unwrap();
+        let config = Config::from_yaml_at(yaml, &path).unwrap();
+        assert_eq!(config.scenario("root/child").unwrap().timeout.as_secs(), 5);
+        let invalid = yaml.replace(
+            "include: child.yml",
+            "include: child.yml\n        timeout: 1",
+        );
+        assert!(matches!(
+            Config::from_yaml_at(&invalid, &path),
+            Err(ConfigError::IncludeWithInlineContent { .. })
+        ));
+        fs::remove_dir_all(directory).unwrap();
     }
 }

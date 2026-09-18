@@ -2,6 +2,7 @@
 
 use crate::{
     config::{DummyStatus, PhaseDefinition},
+    process::Deadline,
     state::{LifecyclePhase, Resource},
 };
 use std::{io::Write, path::Path};
@@ -19,6 +20,7 @@ pub trait Converger {
         resources: &[Resource],
         output: &mut dyn Write,
         styled_output: bool,
+        deadline: &Deadline,
     ) -> Result<(), ConvergerError>;
 }
 
@@ -36,7 +38,11 @@ impl Converger for DummyConverger {
         _resources: &[Resource],
         _output: &mut dyn Write,
         _styled_output: bool,
+        deadline: &Deadline,
     ) -> Result<(), ConvergerError> {
+        deadline
+            .check()
+            .map_err(|error| ConvergerError(error.to_string()))?;
         match definition.dummy_status() {
             DummyStatus::Ok => Ok(()),
             DummyStatus::Error => Err(ConvergerError(format!(
@@ -66,6 +72,7 @@ impl Converger for AnsibleConverger {
         resources: &[Resource],
         output: &mut dyn Write,
         styled_output: bool,
+        deadline: &Deadline,
     ) -> Result<(), ConvergerError> {
         if let Some(ansible) = definition.ansible() {
             let action = match phase {
@@ -80,7 +87,14 @@ impl Converger for AnsibleConverger {
                 }
             };
             self.runtime
-                .converge(scenario_path, action, ansible, inventory, resources)
+                .converge(
+                    scenario_path,
+                    action,
+                    ansible,
+                    inventory,
+                    resources,
+                    deadline,
+                )
                 .map_err(|error| ConvergerError(error.to_string()))
         } else {
             DummyConverger.run(
@@ -91,6 +105,7 @@ impl Converger for AnsibleConverger {
                 resources,
                 output,
                 styled_output,
+                deadline,
             )
         }
     }

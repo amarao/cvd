@@ -13,6 +13,7 @@ use thiserror::Error;
 use crate::{
     config::{DummyStatus, PhaseDefinition},
     context::Invocation,
+    process::Deadline,
     state::{LifecyclePhase, Resource, ResourceLocation, ResourceManifest},
 };
 
@@ -23,6 +24,7 @@ pub trait Provisioner {
         &self,
         scenario_path: &str,
         definition: &PhaseDefinition,
+        deadline: &Deadline,
     ) -> Result<ResourceManifest, ProvisionerError>;
 
     fn destroy(
@@ -30,6 +32,7 @@ pub trait Provisioner {
         scenario_path: &str,
         resources: &ResourceManifest,
         definition: &PhaseDefinition,
+        deadline: &Deadline,
     ) -> Result<(), ProvisionerError>;
 }
 
@@ -42,7 +45,11 @@ impl Provisioner for DummyProvisioner {
         &self,
         scenario_path: &str,
         definition: &PhaseDefinition,
+        deadline: &Deadline,
     ) -> Result<ResourceManifest, ProvisionerError> {
+        deadline
+            .check()
+            .map_err(|error| ProvisionerError(error.to_string()))?;
         if definition.dummy_status() == DummyStatus::Error {
             return Err(ProvisionerError(format!(
                 "dummy create error for `{scenario_path}`"
@@ -70,7 +77,11 @@ impl Provisioner for DummyProvisioner {
         _scenario_path: &str,
         _resources: &ResourceManifest,
         definition: &PhaseDefinition,
+        deadline: &Deadline,
     ) -> Result<(), ProvisionerError> {
+        deadline
+            .check()
+            .map_err(|error| ProvisionerError(error.to_string()))?;
         match definition.dummy_status() {
             DummyStatus::Ok => Ok(()),
             DummyStatus::Error => Err(ProvisionerError("dummy destroy error".to_owned())),
@@ -108,15 +119,24 @@ impl AnsibleProvisioner {
         definition: &crate::config::AnsiblePhaseDefinition,
         overlay: Option<&std::path::Path>,
         resources: &[Resource],
+        deadline: &Deadline,
     ) -> Result<(), ProvisionerError> {
         self.inventory
             .validate_bindings(
                 overlay,
                 definition.playbook.parent().expect("resolved playbook"),
+                deadline,
             )
             .map_err(|error| ProvisionerError(error.to_string()))?;
-        self.run(scenario_path, action, resources, definition, false, overlay)
-            .map(|_| ())
+        self.run(
+            scenario_path,
+            action,
+            resources,
+            definition,
+            overlay,
+            deadline,
+        )
+        .map(|_| ())
     }
 
     fn run(
@@ -125,8 +145,8 @@ impl AnsibleProvisioner {
         action: &'static str,
         resources: &[Resource],
         definition: &crate::config::AnsiblePhaseDefinition,
-        expect_result: bool,
         overlay: Option<&std::path::Path>,
+        deadline: &Deadline,
     ) -> Result<Option<CreateResult>, ProvisionerError> {
         let exchange = Invocation::create().map_err(ProvisionerError)?;
         let (destroy_inventory, other_resources) = destroy_targets(scenario_path, resources);
@@ -156,19 +176,21 @@ impl AnsibleProvisioner {
             command.env("ANSIBLE_INVENTORY", inventory);
         } else {
             self.inventory
-                .apply(&mut command, overlay)
+                .apply(&mut command, overlay, deadline)
                 .map_err(|error| ProvisionerError(error.to_string()))?;
         }
-        let status = command
-            .arg(&definition.playbook)
-            .arg("--extra-vars")
-            .arg(format!("@{}", exchange.input.display()))
-            .current_dir(&self.working_directory)
-            .env("CVD_DIRECTORY", &self.working_directory)
-            .env("CVD_INPUT_FILE", &exchange.input)
-            .env("CVD_RESULT_FILE", &exchange.result)
-            .env("CVD_INVOCATION_ID", &exchange.invocation_id)
-            .status()
+        let status = deadline
+            .status(
+                command
+                    .arg(&definition.playbook)
+                    .arg("--extra-vars")
+                    .arg(format!("@{}", exchange.input.display()))
+                    .current_dir(&self.working_directory)
+                    .env("CVD_DIRECTORY", &self.working_directory)
+                    .env("CVD_INPUT_FILE", &exchange.input)
+                    .env("CVD_RESULT_FILE", &exchange.result)
+                    .env("CVD_INVOCATION_ID", &exchange.invocation_id),
+            )
             .map_err(|error| {
                 ProvisionerError(format!(
                     "cannot run Ansible {action} playbook `{}`: {error}",
@@ -181,7 +203,7 @@ impl AnsibleProvisioner {
                 definition.playbook.display()
             )));
         }
-        if !expect_result {
+        if action != "create" {
             return Ok(None);
         }
         let result: CreateResult =
@@ -217,12 +239,13 @@ impl Provisioner for AnsibleProvisioner {
         &self,
         scenario_path: &str,
         definition: &PhaseDefinition,
+        deadline: &Deadline,
     ) -> Result<ResourceManifest, ProvisionerError> {
         let Some(ansible) = definition.ansible() else {
-            return DummyProvisioner.create(scenario_path, definition);
+            return DummyProvisioner.create(scenario_path, definition, deadline);
         };
         let result = self
-            .run(scenario_path, "create", &[], ansible, true, None)?
+            .run(scenario_path, "create", &[], ansible, None, deadline)?
             .expect("create requests a result");
         let mut ids = BTreeSet::new();
         let resources = result
@@ -267,17 +290,18 @@ impl Provisioner for AnsibleProvisioner {
         scenario_path: &str,
         resources: &ResourceManifest,
         definition: &PhaseDefinition,
+        deadline: &Deadline,
     ) -> Result<(), ProvisionerError> {
         let Some(ansible) = definition.ansible() else {
-            return DummyProvisioner.destroy(scenario_path, resources, definition);
+            return DummyProvisioner.destroy(scenario_path, resources, definition, deadline);
         };
         self.run(
             scenario_path,
             "destroy",
             &resources.resources,
             ansible,
-            false,
             None,
+            deadline,
         )?;
         Ok(())
     }

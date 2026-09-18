@@ -56,6 +56,14 @@ via a schema bump would not improve recovery safety.
 
 ## Write and recovery rules
 
+Phase timeout uses the existing `error` status and error records. Its message
+includes the phase limit in seconds; scenario and phase provenance are recorded
+as for other execution errors. Verification also records the timed-out named
+test. Cleanup and destruction keep separate deadlines and retain their errors
+without replacing the primary failure. A destroy timeout does not mark resources
+destroyed. No state schema change is needed: a monotonic deadline is local to
+the live invocation and is not resumed after interruption.
+
 - Write state before starting a phase with status `running`.
 - Write again immediately after the phase result is known.
 - Write a temporary file in the state directory, flush it, and atomically rename

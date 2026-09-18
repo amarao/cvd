@@ -1,5 +1,6 @@
 //! Recursive lifecycle execution for the dummy stub.
 
+use crate::process::Deadline;
 use std::{
     io::Write,
     time::{SystemTime, UNIX_EPOCH},
@@ -176,7 +177,8 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             let definition = scenario
                 .phase(ConfiguredPhase::Create)
                 .expect("create phase presence was checked");
-            let resources = match self.provisioner.create(path, definition) {
+            let deadline = Deadline::new(scenario.timeout);
+            let resources = match self.provisioner.create(path, definition, &deadline) {
                 Ok(resources) => resources,
                 Err(error) => {
                     self.execution_error(path, LifecyclePhase::Create, error.to_string());
@@ -268,6 +270,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             return true;
         }
 
+        let deadline = Deadline::new(scenario.timeout);
         for (test_name, test) in scenario.tests.iter() {
             let inventory = if test.pytest.is_some() || test.ansible.is_some() {
                 crate::inventory::write_view(
@@ -291,6 +294,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
                     test,
                     inventory.as_deref(),
                     &self.state.visible_resources(path),
+                    &deadline,
                 ),
                 Err(error) => Err(crate::verifier::VerifierError(error)),
             };
@@ -366,7 +370,11 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         let definition = scenario
             .phase(ConfiguredPhase::Destroy)
             .expect("destroy phase presence was checked");
-        match self.provisioner.destroy(path, &resources, definition) {
+        let deadline = Deadline::new(scenario.timeout);
+        match self
+            .provisioner
+            .destroy(path, &resources, definition, &deadline)
+        {
             Ok(()) => {
                 self.state.mark_resources_destroyed(path);
                 let completion_error = self
@@ -414,6 +422,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         let definition = scenario
             .phase(configured_phase(&phase))
             .expect("enabled converger phases have a definition");
+        let deadline = Deadline::new(scenario.timeout);
         let inventory = if definition.ansible().is_some() {
             match crate::inventory::write_view(
                 &mut self.state,
@@ -449,6 +458,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             &resources,
             &mut self.output,
             self.styled_output,
+            &deadline,
         ) {
             Ok(()) => self.complete(path, phase, PhaseStatus::Pass).is_err(),
             Err(error) => {
@@ -460,7 +470,11 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
 
     fn execution_error(&mut self, path: &str, phase: LifecyclePhase, message: String) {
         let record = ErrorRecord::new(path, phase.clone(), message);
-        self.state.record_primary_error(record);
+        if phase == LifecyclePhase::Cleanup && self.state.primary_error.is_some() {
+            self.state.record_cleanup_error(record);
+        } else {
+            self.state.record_primary_error(record);
+        }
         let _ = self.complete(path, phase, PhaseStatus::Error);
     }
 
@@ -1254,6 +1268,7 @@ scenarios:
             _: &crate::config::Test,
             _: Option<&std::path::Path>,
             _: &[crate::state::Resource],
+            _: &Deadline,
         ) -> Result<VerifierStatus, crate::verifier::VerifierError> {
             Ok(VerifierStatus::Error)
         }
@@ -1309,6 +1324,7 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &crate::config::PhaseDefinition,
+            _: &Deadline,
         ) -> Result<ResourceManifest, ProvisionerError> {
             self.calls
                 .borrow_mut()
@@ -1326,6 +1342,7 @@ scenarios:
             scenario_path: &str,
             _: &ResourceManifest,
             _: &crate::config::PhaseDefinition,
+            _: &Deadline,
         ) -> Result<(), ProvisionerError> {
             self.calls
                 .borrow_mut()
@@ -1372,6 +1389,7 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &crate::config::PhaseDefinition,
+            _: &Deadline,
         ) -> Result<ResourceManifest, ProvisionerError> {
             self.0.borrow_mut().push(format!("create:{scenario_path}"));
             Err(ProvisionerError("create failed".into()))
@@ -1382,6 +1400,7 @@ scenarios:
             scenario_path: &str,
             _: &ResourceManifest,
             _: &crate::config::PhaseDefinition,
+            _: &Deadline,
         ) -> Result<(), ProvisionerError> {
             self.0.borrow_mut().push(format!("destroy:{scenario_path}"));
             Ok(())
@@ -1439,6 +1458,7 @@ scenarios:
             &self,
             scenario_path: &str,
             _: &crate::config::PhaseDefinition,
+            _: &Deadline,
         ) -> Result<ResourceManifest, ProvisionerError> {
             self.0.borrow_mut().push(format!("create:{scenario_path}"));
             Ok(ResourceManifest::default())
@@ -1449,6 +1469,7 @@ scenarios:
             scenario_path: &str,
             _: &ResourceManifest,
             _: &crate::config::PhaseDefinition,
+            _: &Deadline,
         ) -> Result<(), ProvisionerError> {
             self.0.borrow_mut().push(format!("destroy:{scenario_path}"));
             Ok(())

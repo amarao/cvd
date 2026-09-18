@@ -1,5 +1,6 @@
 //! Ansible runtime inventory views. Ansible interprets the original sources;
 //! CVD only projects explicit host bindings from visible, existing resources.
+use crate::process::Deadline;
 use crate::state::{LifecyclePhase, Resource, ResourceLocation, RunState};
 use serde_json::{Map, Value, json};
 use std::{
@@ -286,13 +287,15 @@ impl AnsibleInventory {
         }
     }
 
-    fn resolved_sources(&self) -> Result<Vec<PathBuf>, InventoryError> {
+    fn resolved_sources(&self, deadline: &Deadline) -> Result<Vec<PathBuf>, InventoryError> {
         let mut sources = self.sources.clone();
         if sources.is_empty() {
-            let result = std::process::Command::new("ansible-config")
-                .args(["dump", "--format", "json"])
-                .current_dir(&self.working_directory)
-                .output()
+            let result = deadline
+                .output(
+                    std::process::Command::new("ansible-config")
+                        .args(["dump", "--format", "json"])
+                        .current_dir(&self.working_directory),
+                )
                 .map_err(|error| {
                     InventoryError(format!(
                         "cannot read Ansible inventory configuration: {error}"
@@ -327,18 +330,23 @@ impl AnsibleInventory {
         &self,
         command: &mut std::process::Command,
         overlay: Option<&Path>,
+        deadline: &Deadline,
     ) -> Result<(), InventoryError> {
         // With no additions, let Ansible use its normal default selection.
         if !self.sources.is_empty() || overlay.is_some() {
-            command.env("ANSIBLE_INVENTORY", self.environment(overlay)?);
+            command.env("ANSIBLE_INVENTORY", self.environment(overlay, deadline)?);
         }
         Ok(())
     }
 
-    pub(crate) fn environment(&self, overlay: Option<&Path>) -> Result<OsString, InventoryError> {
+    pub(crate) fn environment(
+        &self,
+        overlay: Option<&Path>,
+        deadline: &Deadline,
+    ) -> Result<OsString, InventoryError> {
         let inherited = std::env::var_os("ANSIBLE_INVENTORY").unwrap_or_default();
         let mut sources = if inherited.is_empty() {
-            self.resolved_sources()?
+            self.resolved_sources(deadline)?
         } else {
             self.sources.clone()
         };
@@ -352,18 +360,21 @@ impl AnsibleInventory {
         &self,
         overlay: Option<&Path>,
         playbook_directory: &Path,
+        deadline: &Deadline,
     ) -> Result<(), InventoryError> {
         if let Some(overlay) = overlay {
             // Resolve names with Ansible itself, including inventory plugins.
             // A typo in a reported binding must not introduce a new host.
             let mut command = std::process::Command::new("ansible-inventory");
-            self.apply(&mut command, None)?;
-            let result = command
-                .arg("--list")
-                .arg("--playbook-dir")
-                .arg(playbook_directory)
-                .current_dir(&self.working_directory)
-                .output()
+            self.apply(&mut command, None, deadline)?;
+            let result = deadline
+                .output(
+                    command
+                        .arg("--list")
+                        .arg("--playbook-dir")
+                        .arg(playbook_directory)
+                        .current_dir(&self.working_directory),
+                )
                 .map_err(|error| {
                     InventoryError(format!("cannot inspect Ansible inventory: {error}"))
                 })?;

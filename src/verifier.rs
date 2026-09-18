@@ -9,6 +9,7 @@ use thiserror::Error;
 use crate::{
     config::{DummyStatus, Test},
     context::Invocation,
+    process::Deadline,
     state::VerifierStatus,
 };
 
@@ -21,6 +22,7 @@ pub trait Verifier {
         test: &Test,
         inventory: Option<&Path>,
         resources: &[crate::state::Resource],
+        deadline: &Deadline,
     ) -> Result<VerifierStatus, VerifierError>;
 }
 
@@ -36,7 +38,11 @@ impl Verifier for DummyVerifier {
         test: &Test,
         _inventory: Option<&Path>,
         _resources: &[crate::state::Resource],
+        deadline: &Deadline,
     ) -> Result<VerifierStatus, VerifierError> {
+        deadline
+            .check()
+            .map_err(|error| VerifierError(error.to_string()))?;
         Ok(match test.status {
             DummyStatus::Ok => VerifierStatus::Pass,
             DummyStatus::Fail => VerifierStatus::Fail,
@@ -64,10 +70,18 @@ impl Verifier for RuntimeVerifier {
         test: &Test,
         overlay: Option<&Path>,
         resources: &[crate::state::Resource],
+        deadline: &Deadline,
     ) -> Result<VerifierStatus, VerifierError> {
         if let Some(definition) = &test.ansible {
             self.ansible
-                .converge(scenario_path, "verify", definition, overlay, resources)
+                .converge(
+                    scenario_path,
+                    "verify",
+                    definition,
+                    overlay,
+                    resources,
+                    deadline,
+                )
                 .map_err(|error| {
                     VerifierError(format!(
                         "Ansible test `{scenario_path}::{test_name}`: {error}"
@@ -76,18 +90,25 @@ impl Verifier for RuntimeVerifier {
             return Ok(VerifierStatus::Pass);
         }
         if test.pytest.is_none() {
-            return DummyVerifier.verify(scenario_path, test_name, test, overlay, resources);
+            return DummyVerifier.verify(
+                scenario_path,
+                test_name,
+                test,
+                overlay,
+                resources,
+                deadline,
+            );
         }
         let pytest = test
             .pytest
             .as_ref()
             .ok_or_else(|| VerifierError("pytest verifier requires a test path".to_owned()))?;
         self.inventory
-            .validate_bindings(overlay, &self.working_directory)
+            .validate_bindings(overlay, &self.working_directory, deadline)
             .map_err(|error| VerifierError(error.to_string()))?;
         let inventory = self
             .inventory
-            .environment(overlay)
+            .environment(overlay, deadline)
             .map_err(|error| VerifierError(error.to_string()))?;
         let invocation = Invocation::create().map_err(VerifierError)?;
         let vars = serde_json::json!({});
@@ -103,13 +124,15 @@ impl Verifier for RuntimeVerifier {
         let context_inventory = invocation.write_inventory(&input).map_err(VerifierError)?;
         let inventory = crate::inventory::inventory_environment(inventory, &[context_inventory])
             .map_err(|error| VerifierError(error.to_string()))?;
-        let status = Command::new("pytest")
-            .args(&pytest.args)
-            .arg(&pytest.path)
-            .current_dir(&self.working_directory)
-            .env("CVD_DIRECTORY", &self.working_directory)
-            .env("ANSIBLE_INVENTORY", inventory)
-            .status()
+        let status = deadline
+            .status(
+                Command::new("pytest")
+                    .args(&pytest.args)
+                    .arg(&pytest.path)
+                    .current_dir(&self.working_directory)
+                    .env("CVD_DIRECTORY", &self.working_directory)
+                    .env("ANSIBLE_INVENTORY", inventory),
+            )
             .map_err(|error| {
                 VerifierError(format!(
                     "cannot run pytest for `{scenario_path}::{test_name}`: {error}"

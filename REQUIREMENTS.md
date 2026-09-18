@@ -109,6 +109,56 @@ the next sibling starts; an execution error stops later siblings. Directory
 layout alone does not establish nesting: the `nested` declarations define the
 scenario hierarchy.
 
+### Phase timeouts
+
+Each scenario may set `timeout` to a positive integer number of seconds (up to
+4294967295). It applies separately to every enabled phase: create, prepare,
+converge, idempotence, verify, side_effect, cleanup, and destroy. Root scenarios
+default to 600 seconds. Nested scenarios inherit the nearest ancestor's value
+unless they override it; included scenario bodies follow the same rule. An
+include entry cannot also set timeout; set it in the included body. Null, zero,
+negative, fractional, string, and out-of-range values are configuration errors.
+
+```yaml
+scenarios:
+  cluster:
+    timeout: 600
+    create:
+      ansible: {playbook: create.yml}
+    nested:
+      - name: reboot
+        timeout: 180
+        side_effect:
+          ansible: {playbook: reboot.yml}
+```
+
+CVD uses a monotonic deadline for each phase. All named verification tests
+share the verify phase's budget; starting another test or an inventory helper
+does not reset it. Ansible configuration and inventory discovery consume the
+same budget as the adapter subprocess. Children receive fresh phase budgets;
+there is no cumulative scenario or run deadline.
+
+On expiry CVD terminates the adapter process group, escalating from TERM to
+KILL after a 100 ms grace period, and reaps the adapter. On Linux it also
+terminates observed descendants that have created separate sessions, including
+Ansible workers. This stops local execution; it does not roll back changes or
+cancel work already detached on remote systems. Process termination and local
+state bookkeeping may add a small amount of time beyond the deadline.
+
+A timeout is an execution `error`, with the scenario, phase, and limit in the
+report and persisted error. A timed-out named test is also recorded as `error`.
+Later tests and children stop; normal cleanup and destruction are still
+attempted, each with its own fresh timeout. A destroy timeout leaves resources
+recorded as existing. Secondary cleanup/destroy errors preserve the primary
+failure. Keep mode still suppresses destruction. Create timeout does not change
+the existing complete-manifest requirement or partial-create recovery limits.
+
+Decision: use one inherited per-scenario phase limit rather than adapter-specific
+timeout options, so all subprocesses are bounded consistently. Ten minutes is
+the default to accommodate provisioning while preventing indefinite hangs;
+scenarios needing longer operations must explicitly raise their limit. This is
+an additive configuration-version-1 field. The adapter wire protocol is unchanged.
+
 ### Resource
 
 A **resource** is any provisioned or discovered object, such as a virtual
@@ -628,12 +678,21 @@ The initial version does not require:
 
 A Molecule migration guide can be written separately.
 
-## Planned examples
+## Virtual-machine example
 
-Provide an Ansible-driven virtual-machine showcase demonstrating integration
-tests against actual VMs, including creation, convergence, verification, and
-destruction. This is planned example coverage; the VM provider and example
-implementation remain to be chosen.
+`examples/ansible-libvirt` demonstrates three Debian Trixie etcd members on
+localhost's existing libvirt `default` network. It selects KVM when supported
+and otherwise uses QEMU emulation. Small genericcloud images, 512 MiB guests,
+and unsafe disk caching keep this disposable integration example lightweight.
+Unsafe caching is a VM disk setting; CVD manifests remain atomically written.
+
+The root scenario owns the domains, volumes, pool, and controller workspace.
+Nested scenarios verify cluster health and data survival after each of three
+sequential guest reboots. Nesting preserves the preceding side effects when a
+descendant is selected. Destruction uses recorded ownership and leaves the
+pre-existing network and other libvirt resources alone. Create-failure recovery
+is explicitly outside this example's scope; it does not change the deferred
+partial-create protocol decision.
 
 ## Deferred decisions
 
