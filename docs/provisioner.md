@@ -4,10 +4,19 @@
 
 CVD runs each scenario through its declared phases in this order:
 
-```text
-create → prepare → converge → idempotence → verify → side_effect
-       → child scenarios → cleanup → destroy
+* create
+* prepare
+* converge
+* idempotence (Is it? «recheck»)
+* side_effect
+* verify
+* sequence (with explicit order of phases in it)
+* nested scenarios
+* cleanup
+* destroy
 ```
+
+Each phase is optional.
 
 An Ansible provisioner handles the `create` and `destroy` phases. Create
 creates or discovers resources before the scenario's work begins. Destroy
@@ -220,7 +229,7 @@ Set `verifier: ansible` at the top level or on a named test:
 
 ```yaml
 verify:
-  service:
+    name: Check for service availability
     verifier: ansible
     ansible:
       playbook: verify.yml
