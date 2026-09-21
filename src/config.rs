@@ -34,7 +34,15 @@ pub struct Scenario {
     pub timeout: Duration,
     phases: BTreeMap<ConfiguredPhase, PhaseDefinition>,
     pub tests: TestMap,
+    pub sequence: Vec<SequenceEntry>,
     pub scenarios: ScenarioMap,
+}
+
+#[derive(Debug)]
+pub struct SequenceEntry {
+    pub phase: ConfiguredPhase,
+    pub(crate) definition: Option<PhaseDefinition>,
+    pub(crate) tests: TestMap,
 }
 
 impl Scenario {
@@ -234,6 +242,8 @@ struct RawScenario {
     #[serde(default)]
     destroy: AbsentOrValue,
     #[serde(default)]
+    sequence: AbsentOrValue,
+    #[serde(default)]
     nested: Vec<RawNestedScenario>,
 }
 
@@ -262,6 +272,8 @@ struct RawNestedScenario {
     #[serde(default)]
     destroy: AbsentOrValue,
     #[serde(default)]
+    sequence: AbsentOrValue,
+    #[serde(default)]
     nested: Vec<RawNestedScenario>,
 }
 
@@ -277,6 +289,7 @@ impl RawNestedScenario {
             verify: self.verify,
             cleanup: self.cleanup,
             destroy: self.destroy,
+            sequence: self.sequence,
             nested: self.nested,
         }
     }
@@ -291,6 +304,7 @@ impl RawNestedScenario {
             || self.verify.is_present()
             || self.cleanup.is_present()
             || self.destroy.is_present()
+            || self.sequence.is_present()
             || !self.nested.is_empty()
     }
 }
@@ -527,6 +541,7 @@ fn resolve_scenario(
         verify,
         cleanup,
         destroy,
+        sequence,
         nested,
     } = raw;
     let timeout = match timeout.0 {
@@ -546,6 +561,7 @@ fn resolve_scenario(
     };
     let mut phases = BTreeMap::new();
     let mut tests = IndexMap::new();
+    let mut sequence_entries = Vec::new();
     if let Some(value) = verify.0 {
         tests = parse_tests(value).map_err(|reason| ConfigError::InvalidPhase {
             scenario: path.to_owned(),
@@ -592,6 +608,119 @@ fn resolve_scenario(
                 ansible,
             },
         );
+    }
+
+    if let Some(value) = sequence.0 {
+        let serde_yaml::Value::Sequence(entries) = value else {
+            return Err(ConfigError::InvalidScenario {
+                path: path.to_owned(),
+                reason: "sequence must be a list of phase mappings".to_owned(),
+            });
+        };
+        if entries.is_empty() {
+            return Err(ConfigError::InvalidScenario {
+                path: path.to_owned(),
+                reason: "sequence must not be empty".to_owned(),
+            });
+        }
+        for (index, entry) in entries.into_iter().enumerate() {
+            let serde_yaml::Value::Mapping(mapping) = entry else {
+                return Err(ConfigError::InvalidScenario {
+                    path: path.to_owned(),
+                    reason: format!("sequence[{index}] must be a mapping"),
+                });
+            };
+            if mapping.len() != 1 {
+                return Err(ConfigError::InvalidScenario {
+                    path: path.to_owned(),
+                    reason: format!("sequence[{index}] must contain exactly one phase"),
+                });
+            }
+            let (key, value) = mapping
+                .iter()
+                .next()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .expect("one item checked");
+            let phase_name = key.as_str().ok_or_else(|| ConfigError::InvalidScenario {
+                path: path.to_owned(),
+                reason: format!("sequence[{index}] phase name must be a string"),
+            })?;
+            let phase = match phase_name {
+                "converge" => ConfiguredPhase::Converge,
+                "side_effect" => ConfiguredPhase::SideEffect,
+                "verify" => ConfiguredPhase::Verify,
+                _ => {
+                    return Err(ConfigError::InvalidScenario {
+                        path: path.to_owned(),
+                        reason: format!(
+                            "sequence[{index}] supports only converge, side_effect, and verify"
+                        ),
+                    });
+                }
+            };
+            if phase == ConfiguredPhase::Verify {
+                let mut entry_tests =
+                    parse_tests(value).map_err(|reason| ConfigError::InvalidPhase {
+                        scenario: format!("{path}::sequence[{index}]"),
+                        phase: "verify",
+                        reason,
+                    })?;
+                for (test_name, test) in &mut entry_tests {
+                    if let Some(ansible) = &mut test.ansible {
+                        let target = base
+                            .unwrap_or_else(|| Path::new("."))
+                            .join(&ansible.playbook);
+                        ansible.playbook = fs::canonicalize(&target)
+                            .ok()
+                            .filter(|p| p.is_file())
+                            .ok_or_else(|| ConfigError::InvalidTest {
+                            path: format!("{path}::sequence[{index}]::{test_name}"),
+                            reason: format!("playbook `{}` was not found", target.display()),
+                        })?;
+                    }
+                    if let Some(pytest) = &mut test.pytest {
+                        let target = base.unwrap_or_else(|| Path::new(".")).join(&pytest.path);
+                        pytest.path = fs::canonicalize(&target).map_err(|error| {
+                            ConfigError::InvalidTest {
+                                path: format!("{path}::sequence[{index}]::{test_name}"),
+                                reason: format!(
+                                    "cannot resolve pytest path `{}`: {error}",
+                                    target.display()
+                                ),
+                            }
+                        })?;
+                    }
+                }
+                sequence_entries.push(SequenceEntry {
+                    phase,
+                    definition: None,
+                    tests: TestMap(entry_tests),
+                });
+            } else {
+                validate_phase_value(&value, phase).map_err(|reason| {
+                    ConfigError::InvalidPhase {
+                        scenario: format!("{path}::sequence[{index}]"),
+                        phase: configured_phase_name(phase),
+                        reason,
+                    }
+                })?;
+                let ansible = resolve_ansible_options(&value, phase, base).map_err(|reason| {
+                    ConfigError::InvalidPhase {
+                        scenario: format!("{path}::sequence[{index}]"),
+                        phase: configured_phase_name(phase),
+                        reason,
+                    }
+                })?;
+                sequence_entries.push(SequenceEntry {
+                    phase,
+                    definition: Some(PhaseDefinition {
+                        _value: value,
+                        ansible,
+                    }),
+                    tests: TestMap::default(),
+                });
+            }
+        }
     }
 
     let mut child_scenarios = IndexMap::new();
@@ -688,6 +817,7 @@ fn resolve_scenario(
         timeout,
         phases,
         tests: TestMap(tests),
+        sequence: sequence_entries,
         scenarios: ScenarioMap(child_scenarios),
     })
 }
@@ -1048,6 +1178,30 @@ scenarios:
                 .unwrap()
                 .has_phase(ConfiguredPhase::Prepare)
         );
+    }
+
+    #[test]
+    fn sequence_accepts_only_supported_phase_entries() {
+        let valid = "version: 1\nscenarios:\n  root:\n    sequence:\n      - side_effect: {dummy: {}}\n      - verify: {name: check, dummy: {}}\n      - converge: {dummy: {}}\n";
+        let parsed = Config::from_yaml(valid).unwrap();
+        assert_eq!(parsed.scenario("root").unwrap().sequence.len(), 3);
+        for invalid in [
+            "version: 1\nscenarios:\n  root:\n    sequence: []\n".to_owned(),
+            valid.replace(
+                "      - converge: {dummy: {}}",
+                "      - create: {dummy: {}}",
+            ),
+            valid.replace(
+                "      - converge: {dummy: {}}",
+                "      - converge: {dummy: {}}\n      - destroy: {dummy: {}}",
+            ),
+            valid.replace(
+                "      - converge: {dummy: {}}",
+                "      - verify: {dummy: {}}",
+            ),
+        ] {
+            assert!(Config::from_yaml(&invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

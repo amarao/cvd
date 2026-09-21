@@ -67,9 +67,10 @@ scenarios to arbitrary depth and can define any of these optional phases:
 4. `idempotence`
 5. `verify`
 6. `side_effect`
-7. child scenarios
-8. `cleanup`
-9. `destroy`
+7. `sequence`
+8. child scenarios
+9. `cleanup`
+10. `destroy`
 
 Each scenario explicitly declares the phases it enables as keys. Omitted phase
 keys are recorded as skipped. `verify` contains named test definitions as
@@ -96,6 +97,22 @@ applying the next effect in a chain.
 `side_effect` is a converger phase and uses the same adapter-selection and
 resource-visibility rules as `prepare` and `converge`. Siblings are independent;
 nested siblings share only inherited parent state and resources.
+
+A scenario may declare `sequence` as a nonempty ordered list of phase entries.
+Each entry is a mapping containing exactly one `converge`, `side_effect`, or
+`verify` key, with the same value syntax as that phase in the scenario. The
+sequence is a pseudo-phase; it has no attributes or other supported entries.
+Entries execute after the scenario's ordinary `verify` and `side_effect`, and
+before child scenarios, cleanup, and destruction. Entry order is significant.
+On an execution error, remaining entries and children are skipped; normal
+cleanup and destruction still apply. Verification assertion failures continue
+according to normal verification rules.
+
+Sequence occurrences are identified by their zero-based list index in reports
+and persisted state (for example, `sequence[0]::verify`). This distinguishes
+repeated occurrences of the same phase and scopes test results to that entry;
+indices identify results, not independently selectable work. Sequence entries
+use the scenario's timeout and resource visibility rules.
 
 Decision: use the YAML key and protocol action `side_effect` (with an
 underscore) to match the configuration's identifier naming and avoid separate

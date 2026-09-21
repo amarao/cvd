@@ -100,6 +100,8 @@ pub enum VerifierStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestResult {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence_index: Option<usize>,
     pub status: VerifierStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -170,6 +172,8 @@ pub struct ScenarioState {
     pub phases: BTreeMap<LifecyclePhase, PhaseState>,
     #[serde(default)]
     pub test_results: Vec<TestResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequence: Vec<SequencePhaseState>,
     #[serde(default)]
     pub resources: ResourceManifest,
 }
@@ -182,9 +186,17 @@ impl ScenarioState {
             parent_path,
             phases: BTreeMap::new(),
             test_results: Vec::new(),
+            sequence: Vec::new(),
             resources: ResourceManifest::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequencePhaseState {
+    pub index: usize,
+    pub phase: LifecyclePhase,
+    pub state: PhaseState,
 }
 
 /// The complete durable record of a single CVD invocation.
@@ -730,6 +742,7 @@ mod tests {
             "default/restart",
             TestResult {
                 name: "smoke".into(),
+                sequence_index: None,
                 status: VerifierStatus::Pass,
                 message: None,
                 recorded_at: now(),

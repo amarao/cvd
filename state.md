@@ -39,6 +39,8 @@ Use versioned JSON containing:
 - whether keep mode is active;
 - scenario paths and parent paths;
 - current and completed phase status for each entered scenario;
+- ordered sequence-entry status, with the zero-based index and phase for each
+  occurrence;
 - test results;
 - resource manifests, including existence, attributes, and create/destroy
   scenario-phase locations;
@@ -53,6 +55,12 @@ The `side_effect` lifecycle phase is an additive enum value within state schema
 version 3. Existing schema-3 state contains no such value and remains readable;
 no existing field or value changed meaning, so rejecting all existing run history
 via a schema bump would not improve recovery safety.
+
+Sequence statuses are stored in an optional per-scenario list. Each entry
+records its zero-based index, lifecycle phase, and status/timestamps. Sequence
+test results carry that index alongside their name. Older schema-3 state without
+these optional values remains readable, so sequence support needs no schema
+version change.
 
 ## Write and recovery rules
 

@@ -9,13 +9,13 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    config::{Config, ConfiguredPhase, Scenario},
+    config::{Config, ConfiguredPhase, Scenario, SequenceEntry, TestMap},
     converger::Converger,
     keep::KeepMode,
     provisioner::Provisioner,
     state::{
-        ErrorRecord, LifecyclePhase, PhaseStatus, RunState, ScenarioState, StateError, StateStore,
-        TestResult, VerifierStatus,
+        ErrorRecord, LifecyclePhase, PhaseState, PhaseStatus, RunState, ScenarioState,
+        SequencePhaseState, StateError, StateStore, TestResult, VerifierStatus,
     },
     verifier::Verifier,
 };
@@ -215,6 +215,9 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             if self.run_converger_phase(scenario, path, LifecyclePhase::SideEffect) {
                 return self.finish_after_failure(scenario, path);
             }
+            if self.run_sequence(scenario, path) {
+                return self.finish_after_failure(scenario, path);
+            }
             let Some(child) = scenario.scenarios.get(child_name) else {
                 self.execution_error(
                     path,
@@ -238,6 +241,9 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
                 had_error = self.run_converger_phase(scenario, path, LifecyclePhase::SideEffect);
             }
             if !had_error {
+                had_error = self.run_sequence(scenario, path);
+            }
+            if !had_error {
                 for (child_name, child) in scenario.scenarios.iter() {
                     let child_path = path_with_child(path, child_name);
                     had_error = self.run_scenario(child, &child_path, Some(path.to_owned()), &[]);
@@ -256,22 +262,195 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
         had_error || cleanup_error || destroy_error
     }
 
-    fn verify(&mut self, path: &str, scenario: &Scenario) -> bool {
-        if self
-            .persist_or_record(path, LifecyclePhase::Verify)
-            .is_err()
-        {
-            return true;
+    fn run_sequence(&mut self, scenario: &Scenario, path: &str) -> bool {
+        for (index, entry) in scenario.sequence.iter().enumerate() {
+            self.set_sequence_state(path, index, entry, PhaseState::running());
+            if self.persist().is_err() {
+                return true;
+            }
+            writeln!(
+                self.output,
+                "{path}::sequence[{index}]::{} running",
+                phase_name_for_config(entry.phase)
+            )
+            .ok();
+            let failed = if entry.phase == ConfiguredPhase::Verify {
+                self.verify_tests(path, scenario, &entry.tests, Some(index))
+            } else {
+                let phase = match entry.phase {
+                    ConfiguredPhase::Converge => LifecyclePhase::Converge,
+                    _ => LifecyclePhase::SideEffect,
+                };
+                let definition = entry
+                    .definition
+                    .as_ref()
+                    .expect("converger sequence entry has a definition");
+                let inventory = if definition.ansible().is_some() {
+                    match crate::inventory::write_view(
+                        &mut self.state,
+                        path,
+                        phase.clone(),
+                        self.store.path(),
+                    ) {
+                        Ok(value) => {
+                            if self.persist().is_err() {
+                                return true;
+                            }
+                            value
+                        }
+                        Err(error) => {
+                            self.sequence_error(path, index, entry, &phase, error);
+                            return true;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let result = self.converger.run(
+                    path,
+                    phase.clone(),
+                    definition,
+                    inventory.as_deref(),
+                    &self.state.visible_resources(path),
+                    &mut self.output,
+                    self.styled_output,
+                    &Deadline::new(scenario.timeout),
+                );
+                match result {
+                    Ok(()) => false,
+                    Err(error) => {
+                        self.sequence_error(path, index, entry, &phase, error.to_string());
+                        true
+                    }
+                }
+            };
+            if !failed {
+                self.set_sequence_state(
+                    path,
+                    index,
+                    entry,
+                    PhaseState::completed(PhaseStatus::Pass, None),
+                );
+                if self.persist().is_err() {
+                    return true;
+                }
+                writeln!(
+                    self.output,
+                    "{path}::sequence[{index}]::{} pass",
+                    phase_name_for_config(entry.phase)
+                )
+                .ok();
+            }
+            if failed {
+                self.set_sequence_state(
+                    path,
+                    index,
+                    entry,
+                    PhaseState::completed(PhaseStatus::Error, None),
+                );
+                let _ = self.persist();
+                if entry.phase == ConfiguredPhase::Verify {
+                    writeln!(
+                        self.output,
+                        "{path}::sequence[{index}]::{} error",
+                        phase_name_for_config(entry.phase)
+                    )
+                    .ok();
+                }
+                return true;
+            }
         }
-        if self
-            .write_phase_running(path, &LifecyclePhase::Verify)
-            .is_err()
-        {
-            return true;
+        false
+    }
+
+    fn set_sequence_state(
+        &mut self,
+        path: &str,
+        index: usize,
+        entry: &SequenceEntry,
+        state: PhaseState,
+    ) {
+        let scenario = self
+            .state
+            .scenarios
+            .get_mut(path)
+            .expect("entered scenario");
+        if scenario.sequence.len() <= index {
+            scenario
+                .sequence
+                .resize_with(index + 1, || SequencePhaseState {
+                    index,
+                    phase: LifecyclePhase::Converge,
+                    state: PhaseState::running(),
+                });
+        }
+        scenario.sequence[index] = SequencePhaseState {
+            index,
+            phase: match entry.phase {
+                ConfiguredPhase::Verify => LifecyclePhase::Verify,
+                ConfiguredPhase::SideEffect => LifecyclePhase::SideEffect,
+                _ => LifecyclePhase::Converge,
+            },
+            state,
+        };
+    }
+
+    fn sequence_error(
+        &mut self,
+        path: &str,
+        index: usize,
+        entry: &SequenceEntry,
+        phase: &LifecyclePhase,
+        message: String,
+    ) {
+        self.state.record_primary_error(ErrorRecord::new(
+            path,
+            phase.clone(),
+            format!("sequence[{index}]: {message}"),
+        ));
+        self.set_sequence_state(
+            path,
+            index,
+            entry,
+            PhaseState::completed(PhaseStatus::Error, None),
+        );
+        let _ = self.persist();
+        writeln!(
+            self.output,
+            "{path}::sequence[{index}]::{} error",
+            phase_name_for_config(entry.phase)
+        )
+        .ok();
+    }
+
+    fn verify(&mut self, path: &str, scenario: &Scenario) -> bool {
+        self.verify_tests(path, scenario, &scenario.tests, None)
+    }
+
+    fn verify_tests(
+        &mut self,
+        path: &str,
+        scenario: &Scenario,
+        tests: &TestMap,
+        sequence_index: Option<usize>,
+    ) -> bool {
+        if sequence_index.is_none() {
+            if self
+                .persist_or_record(path, LifecyclePhase::Verify)
+                .is_err()
+            {
+                return true;
+            }
+            if self
+                .write_phase_running(path, &LifecyclePhase::Verify)
+                .is_err()
+            {
+                return true;
+            }
         }
 
         let deadline = Deadline::new(scenario.timeout);
-        for (test_name, test) in scenario.tests.iter() {
+        for (test_name, test) in tests.iter() {
             let inventory = if test.pytest.is_some() || test.ansible.is_some() {
                 crate::inventory::write_view(
                     &mut self.state,
@@ -308,6 +487,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
                         path,
                         TestResult {
                             name: test_name.clone(),
+                            sequence_index,
                             status,
                             message: None,
                             recorded_at: timestamp(),
@@ -330,6 +510,7 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
                         path,
                         TestResult {
                             name: test_name.clone(),
+                            sequence_index,
                             status: VerifierStatus::Error,
                             message: Some(error.to_string()),
                             recorded_at: timestamp(),
@@ -341,8 +522,12 @@ impl<'a, W: Write> LifecycleRunner<'a, W> {
             }
         }
 
-        self.complete(path, LifecyclePhase::Verify, PhaseStatus::Pass)
-            .is_err()
+        if sequence_index.is_some() {
+            false
+        } else {
+            self.complete(path, LifecyclePhase::Verify, PhaseStatus::Pass)
+                .is_err()
+        }
     }
 
     fn destroy(&mut self, scenario: &Scenario, path: &str) -> bool {
@@ -585,6 +770,15 @@ fn render_persisted_scenario<W: Write>(
                 styled_output,
             )?;
         }
+    }
+    for item in &scenario.sequence {
+        writeln!(
+            output,
+            "{path}::sequence[{}]::{} {}",
+            item.index,
+            phase_name(&item.phase),
+            status_name(&item.state.status)
+        )?;
     }
     for child_path in report_child_paths(state, path) {
         render_persisted_scenario(state, child_path, output, styled_output)?;
@@ -838,6 +1032,15 @@ fn phase_name(phase: &LifecyclePhase) -> &'static str {
     }
 }
 
+fn phase_name_for_config(phase: ConfiguredPhase) -> &'static str {
+    match phase {
+        ConfiguredPhase::Converge => "converge",
+        ConfiguredPhase::SideEffect => "side_effect",
+        ConfiguredPhase::Verify => "verify",
+        _ => unreachable!("unsupported sequence phase was rejected during parsing"),
+    }
+}
+
 fn status_name(status: &PhaseStatus) -> &'static str {
     match status {
         PhaseStatus::Pending => "pending",
@@ -1060,6 +1263,86 @@ scenarios:
         assert!(converge < idempotence);
         assert!(idempotence < verify);
         assert!(verify < side_effect);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sequence_runs_after_regular_phases_and_persists_indexed_results() {
+        let config = Config::from_yaml(
+            "version: 1\nscenarios:\n  root:\n    verify: {name: baseline, dummy: {}}\n    side_effect: {dummy: {}}\n    sequence:\n      - verify: {name: check, dummy: {}}\n      - side_effect: {dummy: {}}\n      - converge: {dummy: {}}\n    cleanup: {dummy: {}}\n",
+        ).unwrap();
+        let (store, directory) = test_store("sequence");
+        let provisioner = DummyProvisioner;
+        let converger = DummyConverger;
+        let verifier = DummyVerifier;
+        let bytes = Rc::new(RefCell::new(Vec::new()));
+        let runner = LifecycleRunner::new(
+            &config,
+            &store,
+            state(Some("root"), false),
+            &provisioner,
+            &converger,
+            &verifier,
+            SharedWriter(bytes.clone()),
+        );
+        let (_, run_state) = runner.run(Some("root")).unwrap();
+        let output = String::from_utf8(bytes.borrow().clone()).unwrap();
+        let regular = output.find("root::side_effect pass").unwrap();
+        let first = output.find("root::sequence[0]::verify pass").unwrap();
+        let last = output.find("root::sequence[2]::converge pass").unwrap();
+        let cleanup = output.find("root::cleanup pass").unwrap();
+        assert!(regular < first && first < last && last < cleanup);
+        assert_eq!(run_state.scenarios["root"].sequence.len(), 3);
+        assert_eq!(
+            run_state.scenarios["root"]
+                .test_results
+                .iter()
+                .find(|r| r.name == "check")
+                .unwrap()
+                .sequence_index,
+            Some(0)
+        );
+        let mut report = Vec::new();
+        render_state_report(&run_state, &mut report, false).unwrap();
+        assert!(
+            String::from_utf8(report)
+                .unwrap()
+                .contains("root::sequence[2]::converge pass")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sequence_error_stops_later_entries_and_still_cleans_up() {
+        let config = Config::from_yaml(
+            "version: 1\nscenarios:\n  root:\n    sequence:\n      - converge: {dummy: {status: error}}\n      - verify: {name: should-not-run, dummy: {}}\n    cleanup: {dummy: {}}\n",
+        )
+        .unwrap();
+        let (store, directory) = test_store("sequence-error");
+        let provisioner = DummyProvisioner;
+        let converger = DummyConverger;
+        let verifier = DummyVerifier;
+        let bytes = Rc::new(RefCell::new(Vec::new()));
+        let runner = LifecycleRunner::new(
+            &config,
+            &store,
+            state(Some("root"), false),
+            &provisioner,
+            &converger,
+            &verifier,
+            SharedWriter(bytes.clone()),
+        );
+        let (outcome, run_state) = runner.run(Some("root")).unwrap();
+        let output = String::from_utf8(bytes.borrow().clone()).unwrap();
+        assert_eq!(outcome.execution_errors, 1);
+        assert!(output.contains("root::sequence[0]::converge error"));
+        assert!(output.contains("root::cleanup pass"));
+        assert!(!output.contains("sequence[1]"));
+        assert_eq!(
+            run_state.scenarios["root"].sequence[0].state.status,
+            PhaseStatus::Error
+        );
+        assert!(run_state.scenarios["root"].test_results.is_empty());
         std::fs::remove_dir_all(directory).unwrap();
     }
 
