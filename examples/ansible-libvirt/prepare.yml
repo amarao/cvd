@@ -1,0 +1,22 @@
+---
+- name: Wait for Debian cloud initialization
+  hosts: etcd
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH and Python through the runtime inventory
+      ansible.builtin.wait_for_connection:
+        timeout: 180
+
+    - name: Wait for cloud-init to finish before using apt
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+
+    - name: Gather the guest distribution
+      ansible.builtin.setup:
+        gather_subset: ["!all", "!min", distribution]
+
+    - name: Confirm the downloaded image is Debian Trixie
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Debian'
+          - ansible_facts.distribution_release == 'trixie'

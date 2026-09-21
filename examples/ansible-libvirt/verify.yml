@@ -1,0 +1,50 @@
+---
+- name: Verify quorum, membership and replicated data on every node
+  hosts: etcd
+  gather_facts: false
+  environment:
+    ETCDCTL_API: "3"
+  tasks:
+    - name: Verify all endpoints have recovered
+      ansible.builtin.import_tasks: tasks/health.yml
+
+    - name: Read cluster membership from each node
+      ansible.builtin.command:
+        argv: [etcdctl, --endpoints=http://127.0.0.1:2379, --write-out=json, member, list]
+      register: etcd_members
+      changed_when: false
+
+    - name: Assert all three members are voting members with the expected names
+      ansible.builtin.assert:
+        that:
+          - (etcd_members.stdout | from_json).members | length == 3
+          - (etcd_members.stdout | from_json).members | map(attribute='name') | sort == groups['etcd'] | sort
+          - >-
+            (etcd_members.stdout | from_json).members | selectattr('isLearner', 'defined')
+            | selectattr('isLearner', 'equalto', true) | list | length == 0
+
+    - name: Read the value written before any reboot
+      ansible.builtin.command:
+        argv: [etcdctl, --endpoints=http://127.0.0.1:2379, get, /cvd/persistent, --print-value-only]
+      register: etcd_persistent
+      changed_when: false
+
+    - name: Assert the original value survived
+      ansible.builtin.assert:
+        that: etcd_persistent.stdout == etcd_cluster_token
+
+    - name: Commit a new value at this stage of the scenario
+      ansible.builtin.command:
+        argv: [etcdctl, --endpoints=http://127.0.0.1:2379, put, /cvd/stage, "{{ cvd.scenario_selector }}"]
+      when: inventory_hostname == groups['etcd'][0]
+      changed_when: true
+
+    - name: Read the new value through every member using a linearizable read
+      ansible.builtin.command:
+        argv: [etcdctl, --endpoints=http://127.0.0.1:2379, get, /cvd/stage, --print-value-only, --consistency=l]
+      register: etcd_stage
+      changed_when: false
+
+    - name: Assert replication still works after the side effect
+      ansible.builtin.assert:
+        that: etcd_stage.stdout == cvd.scenario_selector

@@ -1,0 +1,18 @@
+---
+libvirt_uri: qemu:///system
+libvirt_network: default
+libvirt_storage_directory: /var/lib/libvirt/images
+libvirt_memory_mib: 512
+libvirt_vcpus: 1
+libvirt_disk_gib: 4
+# auto selects KVM when libvirt advertises it, otherwise QEMU emulation.
+# qemu can also be selected explicitly to exercise the emulation path.
+libvirt_acceleration: auto
+# The smaller cloud kernel includes the virtio drivers used by this example.
+# https://cloud.debian.org/images/cloud/trixie/latest/
+libvirt_image_directory: https://cloud.debian.org/images/cloud/trixie/latest
+libvirt_image_name: debian-13-genericcloud-amd64.qcow2
+# Shared between runs; not owned or removed by the scenario.
+libvirt_image_cache_directory: >-
+  {{ lookup('ansible.builtin.env', 'XDG_CACHE_HOME')
+     | default(lookup('ansible.builtin.env', 'HOME') ~ '/.cache', true) }}/cvd/images

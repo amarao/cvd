@@ -1,0 +1,41 @@
+<domain type='{{ libvirt_domain_type }}'>
+  <name>{{ libvirt_domain | e }}</name>
+  <memory unit='MiB'>{{ libvirt_memory_mib }}</memory>
+  <vcpu>{{ libvirt_vcpus }}</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features><acpi/><apic/></features>
+{% if libvirt_domain_type == 'kvm' %}
+  <cpu mode='host-passthrough'/>
+{% endif %}
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <!-- Debian's BIOS/GRUB boot path needs VGA even with only a serial console.
+         No graphics server or display port is exposed. -->
+    <video><model type='vga'/></video>
+    <disk type='file' device='disk'>
+      <!-- Unsafe cache is intentional for these disposable test guests. -->
+      <driver name='qemu' type='qcow2' cache='unsafe'/>
+      <source file='{{ libvirt_root_volume.create.path | e }}'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{{ libvirt_seed_volume.create.path | e }}'/>
+      <target dev='hda' bus='ide'/>
+      <readonly/>
+    </disk>
+    <interface type='network'>
+      <source network='{{ libvirt_network | e }}'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'><target port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
+    <memballoon model='virtio'/>
+  </devices>
+</domain>

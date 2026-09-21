@@ -1,0 +1,51 @@
+---
+- name: Remove only the domains in CVD's owned-host inventory
+  hosts: cvd_managed
+  connection: local
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_become: false
+  tasks:
+    - name: List domains to tolerate guests already removed
+      community.libvirt.virt:
+        uri: "{{ cvd_resource.attributes.uri }}"
+        command: list_vms
+      register: libvirt_existing
+
+    - name: Stop the recorded domain
+      community.libvirt.virt:
+        uri: "{{ cvd_resource.attributes.uri }}"
+        name: "{{ cvd_resource.id }}"
+        state: destroyed
+      when: cvd_resource.id in libvirt_existing.list_vms
+
+    - name: Undefine the recorded domain
+      community.libvirt.virt:
+        uri: "{{ cvd_resource.attributes.uri }}"
+        name: "{{ cvd_resource.id }}"
+        command: undefine
+      when: cvd_resource.id in libvirt_existing.list_vms
+
+- name: Release recorded storage and controller files after removing the guests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Remove each owned pool and its recorded volumes
+      ansible.builtin.include_tasks: tasks/destroy_pool.yml
+      loop: "{{ cvd.resources_by_type.get('libvirt.pool', []) }}"
+      loop_control:
+        loop_var: libvirt_owned_pool
+        label: "{{ libvirt_owned_pool.id }}"
+
+    - name: Remove the recorded seed files and disposable SSH key
+      ansible.builtin.file:
+        path: "{{ item.id }}"
+        state: absent
+      loop: "{{ cvd.resources_by_type.get('local.directory', []) }}"
+      loop_control:
+        label: "{{ item.id }}"

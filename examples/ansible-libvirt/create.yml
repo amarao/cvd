@@ -1,0 +1,324 @@
+---
+- name: Prepare the image and storage through the local libvirt API
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Validate the three-node inventory and acceleration selection
+      ansible.builtin.assert:
+        that:
+          - groups['etcd'] == ['etcd1', 'etcd2', 'etcd3']
+          - groups['cvd_managed'] | sort == groups['etcd'] | sort
+          - libvirt_acceleration in ['auto', 'kvm', 'qemu']
+
+    - name: Read capabilities as seen by the libvirt daemon
+      ansible.builtin.command:
+        argv: [virsh, --connect, "{{ libvirt_uri }}", capabilities]
+      register: libvirt_capabilities
+      changed_when: false
+
+    - name: Check for accelerated x86_64 guests
+      community.general.xml:
+        xmlstring: "{{ libvirt_capabilities.stdout }}"
+        xpath: /capabilities/guest/arch[@name='x86_64']/domain[@type='kvm']
+        count: true
+      register: libvirt_kvm
+
+    - name: Choose hardware virtualization or software emulation
+      ansible.builtin.set_fact:
+        libvirt_domain_type: >-
+          {{ ('kvm' if libvirt_kvm.count | int > 0 else 'qemu')
+             if libvirt_acceleration == 'auto' else libvirt_acceleration }}
+
+    - name: Check the selected domain type is supported
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ libvirt_uri }}"
+          - domcapabilities
+          - --arch
+          - x86_64
+          - --virttype
+          - "{{ libvirt_domain_type }}"
+      changed_when: false
+
+    - name: Inspect the existing network without changing it
+      community.libvirt.virt_net:
+        uri: "{{ libvirt_uri }}"
+        name: "{{ libvirt_network }}"
+        command: status
+      register: libvirt_network_status
+
+    - name: Require an active default network
+      ansible.builtin.assert:
+        that: libvirt_network_status.status == 'active'
+
+    - name: Create a private workspace for this run's seed files and SSH key
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: cvd-libvirt-
+      register: libvirt_workspace
+
+    - name: Use the workspace's random name for all libvirt resources
+      ansible.builtin.set_fact:
+        libvirt_pool: "{{ libvirt_workspace.path | basename }}"
+
+    - name: Report the selected virtualization and guest size
+      ansible.builtin.debug:
+        msg: "{{ libvirt_domain_type }}: 3 guests, {{ libvirt_memory_mib }} MiB and {{ libvirt_vcpus }} vCPU each"
+
+    - name: Generate a disposable SSH key
+      community.crypto.openssh_keypair:
+        path: "{{ libvirt_workspace.path }}/id_ed25519"
+        type: ed25519
+        backend: opensshbin
+        mode: "0600"
+      register: libvirt_ssh_key
+
+    - name: Create the persistent image cache directory
+      ansible.builtin.file:
+        path: "{{ libvirt_image_cache_directory }}"
+        state: directory
+        mode: "0700"
+
+    - name: Cache the Debian Trixie cloud image with its published checksum
+      ansible.builtin.get_url:
+        url: "{{ libvirt_image_directory }}/{{ libvirt_image_name }}"
+        dest: "{{ libvirt_image_cache_directory }}/{{ libvirt_image_name }}"
+        checksum: "sha512:{{ libvirt_image_directory }}/SHA512SUMS"
+        mode: "0600"
+        timeout: 120
+
+    - name: Inspect the image's virtual size
+      ansible.builtin.command:
+        argv: [qemu-img, info, --output=json, "{{ libvirt_image_cache_directory }}/{{ libvirt_image_name }}"]
+      register: libvirt_image_info
+      changed_when: false
+
+    - name: Define a storage pool owned solely by this run
+      community.libvirt.virt_pool:
+        uri: "{{ libvirt_uri }}"
+        name: "{{ libvirt_pool }}"
+        state: present
+        xml: |
+          <pool type='dir'>
+            <name>{{ libvirt_pool | e }}</name>
+            <target><path>{{ libvirt_storage_directory | e }}/{{ libvirt_pool | e }}</path></target>
+          </pool>
+
+    - name: Build the pool directory using libvirt permissions
+      community.libvirt.virt_pool:
+        uri: "{{ libvirt_uri }}"
+        name: "{{ libvirt_pool }}"
+        command: build
+
+    - name: Activate the run's storage pool
+      community.libvirt.virt_pool:
+        uri: "{{ libvirt_uri }}"
+        name: "{{ libvirt_pool }}"
+        state: active
+
+    - name: Allocate the base image volume
+      community.libvirt.virt_volume:
+        uri: "{{ libvirt_uri }}"
+        pool: "{{ libvirt_pool }}"
+        state: present
+        xml: |
+          <volume>
+            <name>{{ libvirt_pool | e }}-base.qcow2</name>
+            <capacity unit='bytes'>{{ (libvirt_image_info.stdout | from_json)['virtual-size'] }}</capacity>
+            <target><format type='qcow2'/></target>
+          </volume>
+      register: libvirt_base_volume
+
+    # The volume module has no upload operation. Stream through libvirt so the
+    # controller needs no root access to /var/lib/libvirt/images.
+    - name: Upload the downloaded image to the base volume
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ libvirt_uri }}"
+          - vol-upload
+          - --pool
+          - "{{ libvirt_pool }}"
+          - "{{ libvirt_base_volume.create.name }}"
+          - "{{ libvirt_image_cache_directory }}/{{ libvirt_image_name }}"
+      changed_when: true
+
+- name: Create the three managed guests
+  hosts: cvd_managed
+  connection: local
+  gather_facts: false
+  # Override the guest group's become setting while talking to local libvirt.
+  become: false
+  vars:
+    ansible_become: false
+    libvirt_pool: "{{ hostvars['localhost'].libvirt_pool }}"
+    libvirt_workspace: "{{ hostvars['localhost'].libvirt_workspace }}"
+    libvirt_domain_type: "{{ hostvars['localhost'].libvirt_domain_type }}"
+    libvirt_domain: "{{ libvirt_pool }}-{{ inventory_hostname }}"
+  tasks:
+    - name: Clone the base image into a private guest disk
+      community.libvirt.virt_volume:
+        uri: "{{ libvirt_uri }}"
+        pool: "{{ libvirt_pool }}"
+        state: present
+        clone_source: "{{ hostvars['localhost'].libvirt_base_volume.create.name }}"
+        xml: |
+          <volume>
+            <name>{{ libvirt_domain | e }}.qcow2</name>
+            <capacity unit='G'>{{ libvirt_disk_gib }}</capacity>
+            <target><format type='qcow2'/></target>
+          </volume>
+      register: libvirt_root_volume
+
+    - name: Make a directory for this guest's cloud-init seed
+      ansible.builtin.file:
+        path: "{{ libvirt_workspace.path }}/{{ inventory_hostname }}"
+        state: directory
+        mode: "0700"
+
+    - name: Render cloud-init user data
+      ansible.builtin.template:
+        src: user-data.yml.j2
+        dest: "{{ libvirt_workspace.path }}/{{ inventory_hostname }}/user-data"
+        mode: "0600"
+
+    - name: Write the unique instance identity
+      ansible.builtin.copy:
+        dest: "{{ libvirt_workspace.path }}/{{ inventory_hostname }}/meta-data"
+        mode: "0600"
+        content: "{{ {'instance-id': libvirt_domain, 'local-hostname': inventory_hostname} | to_nice_yaml }}"
+
+    - name: Build a NoCloud seed ISO
+      ansible.builtin.command:
+        argv:
+          - xorriso
+          - -as
+          - mkisofs
+          - -volid
+          - cidata
+          - -joliet
+          - -rock
+          - -output
+          - "{{ libvirt_workspace.path }}/{{ inventory_hostname }}.iso"
+          - "{{ libvirt_workspace.path }}/{{ inventory_hostname }}/user-data"
+          - "{{ libvirt_workspace.path }}/{{ inventory_hostname }}/meta-data"
+        creates: "{{ libvirt_workspace.path }}/{{ inventory_hostname }}.iso"
+
+    - name: Inspect the seed ISO size
+      ansible.builtin.stat:
+        path: "{{ libvirt_workspace.path }}/{{ inventory_hostname }}.iso"
+      register: libvirt_seed_file
+
+    - name: Allocate a cloud-init seed volume
+      community.libvirt.virt_volume:
+        uri: "{{ libvirt_uri }}"
+        pool: "{{ libvirt_pool }}"
+        state: present
+        xml: |
+          <volume>
+            <name>{{ libvirt_domain | e }}.iso</name>
+            <capacity unit='bytes'>{{ libvirt_seed_file.stat.size }}</capacity>
+            <target><format type='raw'/></target>
+          </volume>
+      register: libvirt_seed_volume
+
+    - name: Upload the cloud-init seed through libvirt
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ libvirt_uri }}"
+          - vol-upload
+          - --pool
+          - "{{ libvirt_pool }}"
+          - "{{ libvirt_seed_volume.create.name }}"
+          - "{{ libvirt_workspace.path }}/{{ inventory_hostname }}.iso"
+      changed_when: true
+
+    - name: Define the ephemeral guest with unsafe disk caching
+      community.libvirt.virt:
+        uri: "{{ libvirt_uri }}"
+        command: define
+        xml: "{{ lookup('ansible.builtin.template', 'domain.xml.j2') }}"
+
+    - name: Start the guest
+      community.libvirt.virt:
+        uri: "{{ libvirt_uri }}"
+        name: "{{ libvirt_domain }}"
+        state: running
+
+    # DHCP leases work before SSH or a guest agent is available.
+    - name: Wait for the guest's IPv4 DHCP lease
+      ansible.builtin.command:
+        argv: [virsh, --connect, "{{ libvirt_uri }}", domifaddr, "{{ libvirt_domain }}", --source, lease]
+      register: libvirt_addresses
+      changed_when: false
+      until: libvirt_addresses.stdout is search('ipv4\s+[0-9.]+/')
+      retries: 60
+      delay: 3
+
+    - name: Describe the domain and its runtime inventory binding
+      ansible.builtin.set_fact:
+        libvirt_host_resource:
+          id: "{{ libvirt_domain }}"
+          type: libvirt.domain
+          attributes:
+            uri: "{{ libvirt_uri }}"
+            ansible:
+              inventory_hostname: "{{ inventory_hostname }}"
+              vars:
+                ansible_host: >-
+                  {{ libvirt_addresses.stdout | regex_findall('ipv4\s+([0-9.]+)/') | first }}
+                ansible_connection: ssh
+                ansible_ssh_private_key_file: "{{ libvirt_workspace.path }}/id_ed25519"
+                # Disposable addresses/keys must not alter the user's known_hosts.
+                ansible_ssh_common_args: >-
+                  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes
+                etcd_cluster_token: "{{ libvirt_pool }}"
+        libvirt_volume_resources:
+          - id: "{{ libvirt_root_volume.create.name }}"
+            type: libvirt.volume
+            attributes:
+              uri: "{{ libvirt_uri }}"
+              pool: "{{ libvirt_pool }}"
+          - id: "{{ libvirt_seed_volume.create.name }}"
+            type: libvirt.volume
+            attributes:
+              uri: "{{ libvirt_uri }}"
+              pool: "{{ libvirt_pool }}"
+
+- name: Publish the complete resource manifest
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Describe the shared resources owned by this scenario
+      ansible.builtin.set_fact:
+        libvirt_shared_resources:
+          - id: "{{ libvirt_base_volume.create.name }}"
+            type: libvirt.volume
+            attributes:
+              uri: "{{ libvirt_uri }}"
+              pool: "{{ libvirt_pool }}"
+          - id: "{{ libvirt_pool }}"
+            type: libvirt.pool
+            attributes:
+              uri: "{{ libvirt_uri }}"
+          - id: "{{ libvirt_workspace.path }}"
+            type: local.directory
+
+    - name: Publish hosts followed by their storage and controller workspace
+      ansible.builtin.copy:
+        dest: "{{ cvd.result_file }}"
+        mode: "0600"
+        content: >-
+          {{ {
+            'manifest_version': 1,
+            'invocation_id': cvd.invocation_id,
+            'complete': true,
+            'resources': (groups['cvd_managed'] | map('extract', hostvars, 'libvirt_host_resource') | list)
+              + (groups['cvd_managed'] | map('extract', hostvars, 'libvirt_volume_resources') | flatten)
+              + libvirt_shared_resources
+          } | to_nice_json }}

@@ -1,0 +1,8 @@
+---
+ansible_user: debian
+ansible_become: true
+ansible_python_interpreter: /usr/bin/python3
+etcd_endpoints: >-
+  {% for node in groups['etcd'] %}http://{{ hostvars[node].ansible_host }}:2379{{ ',' if not loop.last else '' }}{% endfor %}
+etcd_initial_cluster: >-
+  {% for node in groups['etcd'] %}{{ node }}=http://{{ hostvars[node].ansible_host }}:2380{{ ',' if not loop.last else '' }}{% endfor %}

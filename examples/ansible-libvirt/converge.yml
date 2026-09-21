@@ -1,0 +1,46 @@
+---
+- name: Form the three-member etcd cluster
+  hosts: etcd
+  gather_facts: false
+  environment:
+    ETCDCTL_API: "3"
+  tasks:
+    - name: Install Debian's etcd packages without starting an unconfigured member
+      ansible.builtin.apt:
+        name: [etcd-server, etcd-client]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        install_recommends: false
+        policy_rc_d: 101
+
+    - name: Configure membership and client endpoints
+      ansible.builtin.template:
+        src: etcd.default.j2
+        dest: /etc/default/etcd
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart etcd
+
+    - name: Enable etcd on every boot
+      ansible.builtin.systemd_service:
+        name: etcd
+        enabled: true
+
+    - name: Start all configured members before checking quorum
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the cluster to become healthy
+      ansible.builtin.import_tasks: tasks/health.yml
+
+    - name: Write a value that must survive all three reboots
+      ansible.builtin.command:
+        argv: [etcdctl, --endpoints=http://127.0.0.1:2379, put, /cvd/persistent, "{{ etcd_cluster_token }}"]
+      when: inventory_hostname == groups['etcd'][0]
+      changed_when: true
+  handlers:
+    - name: Restart etcd
+      ansible.builtin.systemd_service:
+        name: etcd
+        state: restarted

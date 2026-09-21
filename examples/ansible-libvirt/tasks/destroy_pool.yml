@@ -1,0 +1,34 @@
+---
+- name: List pools to tolerate storage already removed
+  community.libvirt.virt_pool:
+    uri: "{{ libvirt_owned_pool.attributes.uri }}"
+    command: list_pools
+  register: libvirt_existing_pools
+
+- name: Remove the recorded pool's storage when it still exists
+  when: libvirt_owned_pool.id in libvirt_existing_pools.list_pools
+  block:
+    - name: Activate the pool so its volumes can be removed
+      community.libvirt.virt_pool:
+        uri: "{{ libvirt_owned_pool.attributes.uri }}"
+        name: "{{ libvirt_owned_pool.id }}"
+        state: active
+
+    - name: Delete only recorded volumes belonging to this pool
+      community.libvirt.virt_volume:
+        uri: "{{ item.attributes.uri }}"
+        pool: "{{ item.attributes.pool }}"
+        name: "{{ item.id }}"
+        state: absent
+      loop: >-
+        {{ cvd.resources_by_type.get('libvirt.volume', [])
+           | selectattr('attributes.pool', 'equalto', libvirt_owned_pool.id)
+           | selectattr('attributes.uri', 'equalto', libvirt_owned_pool.attributes.uri) | list }}
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: Delete and undefine the empty pool
+      community.libvirt.virt_pool:
+        uri: "{{ libvirt_owned_pool.attributes.uri }}"
+        name: "{{ libvirt_owned_pool.id }}"
+        state: deleted

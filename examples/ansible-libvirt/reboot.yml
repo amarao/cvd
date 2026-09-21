@@ -1,0 +1,30 @@
+---
+- name: Require all members to be healthy before removing one from quorum
+  hosts: etcd
+  gather_facts: false
+  any_errors_fatal: true
+  environment:
+    ETCDCTL_API: "3"
+  tasks:
+    # Selecting a deep child skips ancestor verify phases, but still executes
+    # their side effects. Keep this guard here so those reboots remain safe.
+    - name: Wait for the previous node to rejoin before the next reboot
+      ansible.builtin.import_tasks: tasks/health.yml
+
+- name: Reboot exactly one member before its child scenario verifies recovery
+  hosts: "{{ cvd.vars.node }}"
+  gather_facts: false
+  tasks:
+    - name: Require one of the three cluster members
+      ansible.builtin.assert:
+        that:
+          - cvd.vars.node in groups['etcd']
+          - ansible_play_hosts_all | length == 1
+
+    # reboot checks that the boot ID changes and waits for the guest to return.
+    - name: Reboot the selected node and wait for it to return
+      ansible.builtin.reboot:
+        # Ansible allows this much time separately for reboot and its test command.
+        # Both fit within the nested scenario's 180-second CVD phase deadline.
+        reboot_timeout: 60
+        connect_timeout: 5

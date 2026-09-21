@@ -1,0 +1,9 @@
+---
+- name: Check every endpoint can commit a proposal from each guest
+  ansible.builtin.command:
+    argv: [etcdctl, "--endpoints={{ etcd_endpoints }}", --dial-timeout=5s, --command-timeout=15s, endpoint, health]
+  register: etcd_health
+  changed_when: false
+  until: etcd_health.rc == 0
+  retries: 6
+  delay: 3

@@ -1,0 +1,11 @@
+#cloud-config
+users:
+  - name: debian
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - {{ hostvars['localhost'].libvirt_ssh_key.public_key | to_json }}
+ssh_pwauth: false
+disable_root: true

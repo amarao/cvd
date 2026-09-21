@@ -1,0 +1,57 @@
+---
+# Controller: libvirt access, an active default network, virsh, qemu-img,
+# xorriso, ssh-keygen, and Python libvirt/lxml bindings (/usr/bin/python3).
+# Collections: ansible-galaxy collection install -r requirements.yml
+# Run from the repository root: cvd run -F examples/ansible-libvirt
+# Each guest uses 512 MiB; tune libvirt_memory_mib in group_vars/all.yml.
+# Create-failure recovery is outside this example's scope.
+version: 1
+inventory: [inventory.yml]
+
+scenarios:
+  etcd:
+    # Image download, three guest boots, or package installation: at most 10 min per phase.
+    timeout: 600
+    create:
+      ansible:
+        playbook: create.yml
+    prepare:
+      ansible:
+        playbook: prepare.yml
+    converge:
+      ansible:
+        playbook: converge.yml
+    verify:
+      name: cluster
+      ansible:
+        playbook: verify.yml
+    side_effect:
+      ansible:
+        playbook: reboot.yml
+        vars:
+          node: etcd1
+    sequence:
+      - verify:
+          name: cluster_after_etcd1
+          ansible:
+            playbook: verify.yml
+      - side_effect:
+          ansible:
+            playbook: reboot.yml
+            vars:
+              node: etcd2
+      - verify:
+          name: cluster_after_etcd2
+          ansible:
+            playbook: verify.yml
+      - side_effect:
+          ansible:
+            playbook: reboot.yml
+            vars:
+              node: etcd3
+      - verify:
+          name: cluster_after_etcd3
+          ansible: { playbook: verify.yml }
+    destroy:
+      ansible:
+        playbook: destroy.yml
