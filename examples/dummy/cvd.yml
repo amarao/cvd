@@ -21,6 +21,6 @@ scenarios:
       dummy:
         status: ok
     verify:
-      smoke:
-        dummy:
-          status: ok
+      name: smoke
+      dummy:
+        status: ok

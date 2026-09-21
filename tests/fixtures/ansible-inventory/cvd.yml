@@ -12,10 +12,10 @@ scenarios:
       ansible:
         playbook: converge.yml
     verify:
-      inventory:
-        pytest:
-          path: test_inventory.py
-          args: ["-q"]
+      name: inventory
+      pytest:
+        path: test_inventory.py
+        args: ["-q"]
     cleanup:
       ansible:
         playbook: converge.yml

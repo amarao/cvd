@@ -111,12 +111,12 @@ scenarios:
     converge: {ansible: {playbook: play.yml}}
     idempotence: {dummy: {}}
     verify:
-      first: {ansible: {playbook: play.yml}}
-      second: {ansible: {playbook: play.yml}}
+      - {name: first, ansible: {playbook: play.yml}}
+      - {name: second, ansible: {playbook: play.yml}}
     side_effect: {ansible: {playbook: play.yml}}
     nested:
       - name: child
-        verify: {check: {dummy: {}}}
+        verify: {name: check, dummy: {}}
     cleanup: {ansible: {playbook: play.yml}}
     destroy: {ansible: {playbook: play.yml}}
 ";
@@ -249,8 +249,8 @@ fn inventory_helpers_are_bounded_by_the_consuming_phase() {
 fn pytest_timeout_is_a_named_test_error_and_keep_retains_resources() {
     let fixture = Fixture::new();
     fixture.config(&CONFIG.replace(
-        "first: {ansible: {playbook: play.yml}}",
-        "first: {pytest: {path: test.py}}",
+        "{name: first, ansible: {playbook: play.yml}}",
+        "{name: first, pytest: {path: test.py}}",
     ));
     let state = fixture.run("pytest", &[], &["--keep"]);
     let root = &state["scenarios"]["root"];

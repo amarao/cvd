@@ -904,7 +904,7 @@ scenarios:
     destroy:
       dummy:
     verify:
-      smoke: {dummy: {}}
+      - {name: smoke, dummy: {}}
     nested:
       - name: restart
         create:
@@ -914,7 +914,7 @@ scenarios:
         destroy:
           dummy:
         verify:
-          after-restart: {dummy: {}}
+          - {name: after-restart, dummy: {}}
         nested:
           - name: deep
             create:

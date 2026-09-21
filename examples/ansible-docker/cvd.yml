@@ -13,10 +13,10 @@ scenarios:
       ansible: # converger type
         playbook: converge.yml
     verify:
-      greeting_ansible: # name of the verifier run
+      - name: greeting_ansible # name of the verifier run
         ansible:
           playbook: verify.yml
-      greeting:
+      - name: greeting
         pytest:
           path: tests/test_web.py
           args: ["-v"]

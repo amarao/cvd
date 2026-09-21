@@ -42,7 +42,7 @@ scenarios:
       ansible: {playbook: phase.yml}
     converge: *action
     verify: &tests
-      probe:
+      - name: probe
         pytest: {path: probe.py}
     cleanup: *action
     destroy: *action

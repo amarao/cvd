@@ -504,12 +504,12 @@ scenarios:
     create: {dummy: {status: ok}}
     destroy: {dummy: {status: ok}}
     verify:
-      assertion: {dummy: {status: fail}}
+      - {name: assertion, dummy: {status: fail}}
   verifier-error:
     create: {dummy: {status: ok}}
     destroy: {dummy: {status: ok}}
     verify:
-      broken: {dummy: {status: error}}
+      - {name: broken, dummy: {status: error}}
   destroy-error:
     create: {dummy: {status: ok}}
     destroy: {dummy: {status: error}}
@@ -1067,24 +1067,24 @@ scenarios:
       ansible:
         playbook: destroy.yml
     verify:
-      first:
+      - name: first
         pytest:
           path: test_example.py
           args: ["-k", "a name with spaces", "$(not-a-shell)"]
-      second:
+      - name: second
         dummy:
     nested:
       - name: child
         verify:
-          inherited:
+          - name: inherited
             pytest:
               path: test_example.py
 "#
         );
         let yaml = if mode == "multiple" {
             yaml.replace(
-                "      second:\n        dummy:",
-                "      second:\n        pytest:\n          path: test_example.py",
+                "      - name: second\n        dummy:",
+                "      - name: second\n        pytest:\n          path: test_example.py",
             )
         } else {
             yaml
@@ -1400,9 +1400,9 @@ scenarios:
     nested:
       - name: child
         verify:
-          check:
+          - name: check
             ansible: {playbook: verify.yml, vars: {expected: yes}}
-          later:
+          - name: later
             dummy:
         cleanup:
           dummy:

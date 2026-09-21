@@ -75,7 +75,11 @@ Each scenario explicitly declares the phases it enables as keys. Omitted phase
 keys are recorded as skipped. `verify` contains named test definitions as
 described below. Other phase values must be one adapter mapping or a nonempty
 ordered list of adapter mappings. Each mapping contains exactly one adapter
-name and its input. Bare null/scalar phases, empty mappings, and scalar lists
+key and its input, and may contain a sibling `name` field. Names must be
+nonblank strings, obey the same name rules as tests, and be unique within a
+phase list when supplied. Outside verification, names are descriptive
+configuration metadata; execution and reporting still identify the lifecycle
+phase. Bare null/scalar phases, empty mappings, and scalar lists
 are rejected because they do not select an adapter. Adapter input can be null
 when that adapter allows it, for example `create: {dummy: null}`.
 
@@ -191,15 +195,43 @@ represent the same state.
 
 ### Test
 
-A **test** is a named verifier invocation. A scenario can define one or more
-tests directly under its `verify` mapping. Declaring those tests enables the
+A **test** is a named verifier invocation. A scenario can define one test as a
+mapping under `verify`, or several tests as an ordered list of mappings.
+Each test declares an explicit `name` alongside exactly one verifier adapter:
+
+```yaml
+verify:
+  name: cluster
+  ansible:
+    playbook: verify.yml
+```
+
+```yaml
+verify:
+  - name: cluster
+    ansible: {playbook: verify.yml}
+  - name: replication
+    pytest: {path: tests/test_replication.py}
+```
+
+Declaring those tests enables the
 verification phase; there is no separate `tests` section. Omitted `verify`
 is skipped. `verify: {}` or `verify:` enables an empty verification phase,
-which passes without invoking a verifier. Verification accepts named test
-mappings. Each named test contains exactly one verifier adapter key and its
-options, for example `smoke: {dummy: {}}`. Empty/null test definitions,
-multiple adapter keys, legacy `tests` keys, and scalar/list verify payloads
-are rejected.
+which passes without invoking a verifier. A verification list must be nonempty.
+Names must be nonblank strings, cannot be `.` or `..`, cannot contain `/`, and
+must be unique within the scenario's verification phase. Test order follows
+list order, including when different adapters are used. Empty/null list
+entries, missing names, multiple adapter keys, legacy `tests` keys, scalar
+payloads, and the former test-name wrapper mappings are rejected.
+
+Decision: use `name` as explicit metadata beside the adapter in every phase,
+so test names are not confused with adapter keys and single tests need one
+less mapping level. Names remain mandatory for tests because reports and
+persisted test results use them; names are optional on other phase actions.
+This replaces the previous verification syntax within the initial version-1
+configuration schema. It changes no lifecycle ordering, scenario nesting,
+adapter protocol, or persisted-state format. Real-adapter lists outside
+verification remain deferred; adding names does not enable them.
 
 ### Adapters
 
@@ -410,11 +442,11 @@ An `ansible` mapping selects Ansible for a named test:
 
 ```yaml
 verify:
-  service:
-    ansible:
-      playbook: verify.yml
-      vars:
-        expected_port: 8080
+  name: service
+  ansible:
+    playbook: verify.yml
+    vars:
+      expected_port: 8080
 ```
 
 Playbooks resolve relative to the scenario's configuration file and run from
@@ -437,10 +469,10 @@ through the installed `pytest-testinfra` plugin:
 scenarios:
   default:
     verify:
-      web:
-        pytest:
-          path: tests/test_web.py
-          args: ["-q"]
+      name: web
+      pytest:
+        path: tests/test_web.py
+        args: ["-q"]
 ```
 
 A testinfra module can select its inventory group directly:
@@ -685,12 +717,23 @@ localhost's existing libvirt `default` network. It selects KVM when supported
 and otherwise uses QEMU emulation. Small genericcloud images, 512 MiB guests,
 and unsafe disk caching keep this disposable integration example lightweight.
 Unsafe caching is a VM disk setting; CVD manifests remain atomically written.
+The downloaded image is shared between runs in `$XDG_CACHE_HOME/cvd/images`
+(defaulting to `~/.cache/cvd/images`), outside scenario ownership and destruction.
+Ansible's `get_url` reuses it when the published checksum matches, downloading
+again only when the image changes or the cached copy is missing or corrupt.
+The serial-console-only domain still supplies an emulated VGA device: the
+Debian image's BIOS/GRUB boot path resets before entering Linux without it.
+No graphical server or display port is exposed. Guest connection, health, and
+reboot retries fit within the configured CVD phase deadlines (600 seconds for
+the root and 180 seconds for the nested recovery scenarios).
 
 The root scenario owns the domains, volumes, pool, and controller workspace.
 Nested scenarios verify cluster health and data survival after each of three
 sequential guest reboots. Nesting preserves the preceding side effects when a
-descendant is selected. Destruction uses recorded ownership and leaves the
-pre-existing network and other libvirt resources alone. Create-failure recovery
+descendant is selected. Each reboot also requires a healthy cluster before
+proceeding, because ancestor verification is skipped during nested selection.
+Destruction uses recorded ownership and leaves the pre-existing network and
+other libvirt resources alone. Create-failure recovery
 is explicitly outside this example's scope; it does not change the deferred
 partial-create protocol decision.
 

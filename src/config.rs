@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -545,15 +545,13 @@ fn resolve_scenario(
         }
     };
     let mut phases = BTreeMap::new();
-    let mut tests = NamedMap::<Test>::default();
+    let mut tests = IndexMap::new();
     if let Some(value) = verify.0 {
-        if !value.is_null() {
-            tests = serde_yaml::from_value(value).map_err(|error| ConfigError::InvalidPhase {
-                scenario: path.to_owned(),
-                phase: "verify",
-                reason: format!("verify must be a mapping of named tests: {error}"),
-            })?;
-        }
+        tests = parse_tests(value).map_err(|reason| ConfigError::InvalidPhase {
+            scenario: path.to_owned(),
+            phase: "verify",
+            reason,
+        })?;
         phases.insert(
             ConfiguredPhase::Verify,
             PhaseDefinition {
@@ -653,7 +651,7 @@ fn resolve_scenario(
         child_scenarios.insert(name, resolved);
     }
 
-    for (name, test) in &mut tests.0 {
+    for (name, test) in &mut tests {
         if let Some(ansible) = &mut test.ansible {
             let target = base
                 .unwrap_or_else(|| Path::new("."))
@@ -689,7 +687,7 @@ fn resolve_scenario(
     Ok(Scenario {
         timeout,
         phases,
-        tests: TestMap(tests.0),
+        tests: TestMap(tests),
         scenarios: ScenarioMap(child_scenarios),
     })
 }
@@ -734,6 +732,7 @@ fn validate_phase_value(value: &serde_yaml::Value, phase: ConfiguredPhase) -> Re
                     "a phase list must contain one or more adapter mappings".to_owned(),
                 );
             }
+            let mut names = BTreeSet::new();
             if mappings {
                 for action in actions {
                     let serde_yaml::Value::Mapping(mapping) = action else {
@@ -745,6 +744,11 @@ fn validate_phase_value(value: &serde_yaml::Value, phase: ConfiguredPhase) -> Re
                         );
                     }
                     validate_action_mapping(mapping, phase)?;
+                    if let Some(name) = action_parts(mapping)?.0
+                        && !names.insert(name)
+                    {
+                        return Err(format!("duplicate action name `{name}`"));
+                    }
                 }
             }
             Ok(())
@@ -757,15 +761,8 @@ fn validate_action_mapping(
     mapping: &serde_yaml::Mapping,
     phase: ConfiguredPhase,
 ) -> Result<(), String> {
-    if mapping.len() != 1 {
-        return Err("an adapter mapping must contain exactly one adapter name".to_owned());
-    }
-    let adapter = mapping.keys().next().expect("mapping length was checked");
-    let serde_yaml::Value::String(adapter) = adapter else {
-        return Err("an adapter name must be a string".to_owned());
-    };
-    let options = mapping.values().next().expect("mapping length was checked");
-    match adapter.as_str() {
+    let (_, adapter, options) = action_parts(mapping)?;
+    match adapter {
         "dummy" => {
             let options = parse_dummy_options(options)?;
             if options.status == DummyStatus::Fail {
@@ -795,6 +792,66 @@ fn validate_action_mapping(
         _ => return Err(format!("unsupported implementation `{adapter}`")),
     }
     Ok(())
+}
+
+/// Names are CVD metadata alongside exactly one adapter and its options.
+fn action_parts(
+    mapping: &serde_yaml::Mapping,
+) -> Result<(Option<&str>, &str, &serde_yaml::Value), String> {
+    let name = mapping
+        .get("name")
+        .map(|value| {
+            let name = value.as_str().ok_or("name must be a string")?;
+            validate_name(name)?;
+            if name.trim().is_empty() {
+                return Err("name must not be blank".to_owned());
+            }
+            Ok(name)
+        })
+        .transpose()?;
+    let mut adapters = mapping
+        .iter()
+        .filter(|(key, _)| key.as_str() != Some("name"));
+    let Some((adapter, options)) = adapters.next() else {
+        return Err(
+            "an action must contain exactly one adapter alongside its optional name".to_owned(),
+        );
+    };
+    if adapters.next().is_some() {
+        return Err(
+            "an action must contain exactly one adapter alongside its optional name".to_owned(),
+        );
+    }
+    let adapter = adapter.as_str().ok_or("an adapter name must be a string")?;
+    Ok((name, adapter, options))
+}
+
+fn parse_tests(value: serde_yaml::Value) -> Result<IndexMap<String, Test>, String> {
+    let actions = match value {
+        serde_yaml::Value::Null => return Ok(IndexMap::new()),
+        serde_yaml::Value::Mapping(mapping) if mapping.is_empty() => return Ok(IndexMap::new()),
+        serde_yaml::Value::Mapping(_) => vec![value],
+        serde_yaml::Value::Sequence(actions) if !actions.is_empty() => actions,
+        _ => return Err("verify requires a named action or a nonempty list of named actions; use `name: cluster` alongside the adapter".to_owned()),
+    };
+    let mut tests = IndexMap::new();
+    for action in actions {
+        let serde_yaml::Value::Mapping(mut mapping) = action else {
+            return Err(
+                "each verification test must be a mapping with `name` and one adapter".to_owned(),
+            );
+        };
+        let (name, _, _) = action_parts(&mapping)?;
+        let name = name.ok_or("a verification test requires `name: ...` alongside its adapter; test-name wrapper mappings are no longer supported")?.to_owned();
+        if tests.contains_key(&name) {
+            return Err(format!("duplicate test name `{name}`"));
+        }
+        mapping.remove("name");
+        let test = serde_yaml::from_value(serde_yaml::Value::Mapping(mapping))
+            .map_err(|error| format!("invalid test `{name}`: {error}"))?;
+        tests.insert(name, test);
+    }
+    Ok(tests)
 }
 
 fn parse_dummy_options(value: &serde_yaml::Value) -> Result<DummyOptions, String> {
@@ -893,7 +950,7 @@ scenarios:
     destroy:
       dummy:
     verify:
-      smoke: {dummy: {}}
+      - {name: smoke, dummy: {}}
     nested:
       - name: restart
         create:
@@ -923,7 +980,7 @@ scenarios:
         let root = std::env::temp_dir().join(format!("cvd-verify-config-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("verify.yml"), "---\n").unwrap();
-        let base = "version: 1\nscenarios:\n  root:\n    verify:\n      check:\n";
+        let base = "version: 1\nscenarios:\n  root:\n    verify:\n      - name: check\n";
         let valid = format!("{base}        ansible: {{playbook: verify.yml}}\n");
         let config = Config::from_yaml_at(&valid, &root.join("cvd.yml")).unwrap();
         let test = config
@@ -1078,7 +1135,7 @@ scenarios:
             "destroy",
         ] {
             let yaml = format!(
-                "version: 1\nscenarios:\n  root:\n    {phase}:\n      ansible:\n        playbook: converge.yml\n"
+                "version: 1\nscenarios:\n  root:\n    {phase}:\n      name: action\n      ansible:\n        playbook: converge.yml\n"
             );
             Config::from_yaml_at(&yaml, &path).unwrap();
         }
@@ -1105,7 +1162,7 @@ scenarios:
         let child = directory.join("nested");
         fs::create_dir_all(&child).unwrap();
         fs::write(child.join("test_host.py"), "def test_host(): pass\n").unwrap();
-        let fragment = "verify:\n  host:\n    pytest:\n      path: test_host.py\n      args: ['-k', 'a name']\n";
+        let fragment = "verify:\n  - name: host\n    pytest:\n      path: test_host.py\n      args: ['-k', 'a name']\n";
         fs::write(child.join("scenario.yml"), fragment).unwrap();
         let yaml = "version: 1\nscenarios:\n  root:\n    nested:\n      - name: child\n        include: nested/scenario.yml\n";
         let root = directory.join("cvd.yml");
@@ -1217,13 +1274,13 @@ scenarios:
         ));
 
         let duplicate_test = NESTED.replacen(
-            "      smoke: {dummy: {}}",
-            "      smoke: {dummy: {}}\n      smoke: {dummy: {}}",
+            "      - {name: smoke, dummy: {}}",
+            "      - {name: smoke, dummy: {}}\n      - {name: smoke, dummy: {}}",
             1,
         );
         assert!(matches!(
             Config::from_yaml(&duplicate_test),
-            Err(ConfigError::Parse(_))
+            Err(ConfigError::InvalidPhase { .. })
         ));
 
         let malformed_action = NESTED.replacen(
@@ -1246,8 +1303,8 @@ scenarios:
                 1,
             )
             .replacen(
-                "      smoke: {dummy: {}}",
-                "      smoke:\n        dummy:\n          status: fail",
+                "      - {name: smoke, dummy: {}}",
+                "      - name: smoke\n        dummy:\n          status: fail",
                 1,
             );
         Config::from_yaml(&valid).unwrap();
@@ -1265,8 +1322,8 @@ scenarios:
         }
 
         let invalid_test = NESTED.replacen(
-            "      smoke: {dummy: {}}",
-            "      smoke:\n        dummy:\n          status: unknown",
+            "      - {name: smoke, dummy: {}}",
+            "      - name: smoke\n        dummy:\n          status: unknown",
             1,
         );
         assert!(matches!(
@@ -1292,7 +1349,7 @@ scenarios:
                 .has_phase(ConfiguredPhase::Verify)
         );
         let config = Config::from_yaml(&format!(
-            "{base}    verify:\n      z: {{dummy: {{}}}}\n      a: {{dummy: {{status: fail}}}}\n"
+            "{base}    verify:\n      - {{name: z, dummy: {{}}}}\n      - {{name: a, dummy: {{status: fail}}}}\n"
         ))
         .unwrap();
         assert_eq!(
@@ -1340,7 +1397,7 @@ scenarios:
                 "{scenario}"
             );
             let test = format!(
-                "version: 1\nscenarios:\n  root:\n    verify:\n      smoke:\n        {selector}: dummy\n        dummy: {{}}\n"
+                "version: 1\nscenarios:\n  root:\n    verify:\n      - name: smoke\n        {selector}: dummy\n        dummy: {{}}\n"
             );
             assert!(Config::from_yaml(&test).is_err(), "{test}");
         }
@@ -1412,14 +1469,120 @@ scenarios:
             "{ansible: {playbook: unused.yml, status: ok}}",
             "{pytest: {path: unused.py, status: ok}}",
         ] {
-            let yaml =
-                format!("version: 1\nscenarios:\n  root:\n    verify:\n      smoke: {payload}\n");
+            let options = payload
+                .strip_prefix('{')
+                .and_then(|value| value.strip_suffix('}'))
+                .unwrap_or(payload);
+            let yaml = format!(
+                "version: 1\nscenarios:\n  root:\n    verify: {{name: smoke, {options}}}\n"
+            );
             assert!(Config::from_yaml(&yaml).is_err(), "{yaml}");
         }
         for payload in ["{dummy: null}", "{dummy: {}}", "{dummy: {status: fail}}"] {
-            let yaml =
-                format!("version: 1\nscenarios:\n  root:\n    verify:\n      smoke: {payload}\n");
+            let options = payload
+                .strip_prefix('{')
+                .and_then(|value| value.strip_suffix('}'))
+                .unwrap_or(payload);
+            let yaml = format!(
+                "version: 1\nscenarios:\n  root:\n    verify: {{name: smoke, {options}}}\n"
+            );
             Config::from_yaml(&yaml).unwrap();
+        }
+    }
+
+    #[test]
+    fn flat_verification_requires_unique_explicit_names() {
+        let base = "version: 1\nscenarios:\n  root:\n    verify: ";
+        for payload in [
+            "{name: cluster, dummy: {}}",
+            "{dummy: {}, name: cluster}",
+            "[{name: cluster, dummy: {}}]",
+        ] {
+            let config = Config::from_yaml(&format!("{base}{payload}\n")).unwrap();
+            assert_eq!(
+                config
+                    .scenario("root")
+                    .unwrap()
+                    .tests
+                    .iter()
+                    .next()
+                    .unwrap()
+                    .0,
+                "cluster"
+            );
+        }
+        for payload in [
+            "{cluster: {dummy: {}}}",
+            "[{cluster: {dummy: {}}}]",
+            "{dummy: {}}",
+            "{name: cluster}",
+            "{name: null, dummy: {}}",
+            "{name: 42, dummy: {}}",
+            "{name: true, dummy: {}}",
+            "{name: [], dummy: {}}",
+            "{name: '', dummy: {}}",
+            "{name: '  ', dummy: {}}",
+            "{name: '.', dummy: {}}",
+            "{name: '..', dummy: {}}",
+            "{name: parent/child, dummy: {}}",
+            "{name: first, name: second, dummy: {}}",
+            "[{name: duplicate, dummy: {}}, {name: duplicate, dummy: {}}]",
+            "[{name: cluster, dummy: {}}, null]",
+            "[{name: cluster, dummy: {}}, {}]",
+            "[{name: cluster, dummy: {}}, script.py]",
+        ] {
+            assert!(
+                Config::from_yaml(&format!("{base}{payload}\n")).is_err(),
+                "{payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_phase_actions_accept_names_alongside_the_adapter() {
+        for phase in [
+            ConfiguredPhase::Create,
+            ConfiguredPhase::Prepare,
+            ConfiguredPhase::Converge,
+            ConfiguredPhase::Idempotence,
+            ConfiguredPhase::SideEffect,
+            ConfiguredPhase::Cleanup,
+            ConfiguredPhase::Destroy,
+        ] {
+            let base = format!(
+                "version: 1\nscenarios:\n  root:\n    {}: ",
+                super::configured_phase_name(phase)
+            );
+            for payload in [
+                "{name: action, dummy: {status: error}}",
+                "{dummy: {status: error}, name: action}",
+                "[{name: first, dummy: {}}, {name: second, dummy: {status: error}}]",
+            ] {
+                let config = Config::from_yaml(&format!("{base}{payload}\n")).unwrap();
+                assert_eq!(
+                    config
+                        .scenario("root")
+                        .unwrap()
+                        .phase(phase)
+                        .unwrap()
+                        .dummy_status(),
+                    super::DummyStatus::Error
+                );
+            }
+            for payload in [
+                "{name: null, dummy: {}}",
+                "{name: 42, dummy: {}}",
+                "{name: '  ', dummy: {}}",
+                "{name: parent/child, dummy: {}}",
+                "{name: action}",
+                "{name: action, dummy: {}, ansible: {playbook: unused.yml}}",
+                "[{name: duplicate, dummy: {}}, {name: duplicate, dummy: {}}]",
+            ] {
+                assert!(
+                    Config::from_yaml(&format!("{base}{payload}\n")).is_err(),
+                    "{base}{payload}"
+                );
+            }
         }
     }
 
@@ -1441,9 +1604,9 @@ side_effect: {ansible: {playbook: playbook.yml}}
 cleanup: {dummy: {}}
 destroy: {ansible: {playbook: playbook.yml}}
 verify:
-  playbook: {ansible: {playbook: playbook.yml}}
-  python: {pytest: {path: test_web.py}}
-  assertion: {dummy: {status: fail}}
+  - {name: playbook, ansible: {playbook: playbook.yml}}
+  - {name: python, pytest: {path: test_web.py}}
+  - {name: assertion, dummy: {status: fail}}
 "#,
         )
         .unwrap();
